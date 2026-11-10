@@ -1,0 +1,39 @@
+# The `stock` entity in the catalog semantic layer.
+# Maps a SKU to its on-hand count and next-receipt info at each branch.
+# Every column in catalog.db's `stock` table is declared here (SPEC §8.1).
+
+table: stock
+key: [sku, branch_id]
+description: Per-branch inventory snapshot used for shortfall and transfer suggestions.
+
+fields:
+  sku:
+    type: text
+    description: "FK to products.sku."
+
+  branch_id:
+    type: text
+    returnable: true
+    description: >
+      FK to branches.id. Not agent-filterable — the query builder always
+      injects the current run's branch_id from code (same pattern as
+      products.active = 1, SPEC §8.2). Other branches are only read by the
+      code-owned transfers.py via the stock_all_branches named query.
+
+  on_hand:
+    type: int
+    returnable: true
+    description: "Units currently in stock at this branch, counted in the product's sale_unit."
+
+  next_receipt_date:
+    type: text
+    returnable: true
+    description: "ISO-8601 date of the next scheduled receipt, or null."
+
+  next_receipt_qty:
+    type: int
+    returnable: true
+    description: "Units expected on the next receipt, or null."
+
+joins:
+  stock_branches: {from: branch_id, to: branches.id, type: inner}

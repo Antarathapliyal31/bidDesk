@@ -124,7 +124,7 @@ bidDesk/                        # repo root (github.com/Antarathapliyal31/bidDes
           verify.py             # quote/quantity/unit/sanity checks (pure functions)
           prompts.py
         pricing/
-          agent.py              # tool loop over query_catalog / run_named_query, ends with submit_matches
+          agent.py              # tool loop over query_catalog, ends with submit_matches
           verify.py             # SKU existence, DB price/stock, attribute checks
           confidence.py         # high/medium/low + reasons (pure)
           transfers.py          # shortfall + transfer options across branches (pure + named query)
@@ -193,7 +193,7 @@ Each agent owns exactly one capability that the others cannot reach. The orchest
 |---|---|---|---|
 | **Orchestrator** | Decide: triage items, ask the analyst targeted follow-ups, attach requirements to items, decide what to price/re-price, flag conflicts, write summary/assumptions/contractor questions | Read the PDF; query the catalog; edit items; type prices or totals | Tool-use loop (§7) |
 | **Document Analyst** | Read the document: page texts, page images, tables. Extract items/exclusions/labor/notes with source quote + page. Answer questions about the document with verified citations | Price anything; see the catalog | (a) structured extraction via forced tool; (b) Q&A tool loop with `search_pages`, `get_page` |
-| **Pricing Agent** | Query the catalog via the semantic layer (`query_catalog`, `run_named_query`). Propose SKU matches, substitutes, assumptions | See the document; set prices (prices come from DB rows via code) | Tool-use loop ending in forced `submit_matches` |
+| **Pricing Agent** | Query the catalog via the semantic layer (`query_catalog` only). Propose SKU matches, substitutes, assumptions | See the document; set prices (prices come from DB rows via code); call any named query (those are code-only, invoked by `transfers.py` when a shortfall needs cross-branch stock) | Tool-use loop over `query_catalog`, ending in forced `submit_matches` |
 
 Why the orchestrator never sees raw document text: (1) capability ownership makes delegation real; (2) context isolation — a 50-page RFP stays in the analyst's context, the orchestrator gets a compact typed scope; (3) prompt-injection surface is reduced.
 The orchestrator **does** see extracted item fields and quotes (read-only, spotlighted) — it needs them to reason.
@@ -394,7 +394,10 @@ CREATE TABLE bid_edits (               -- audit of every applied EditOp
 
 ### 5.2 Catalog DB (`backend/data/catalog.db`) — built by `catalog/seed.py`, opened read-only
 ```sql
-CREATE TABLE branches (id TEXT PRIMARY KEY, name TEXT, city TEXT, state TEXT, tax_rate_bps INTEGER);  -- 3 branches
+CREATE TABLE branches (id TEXT PRIMARY KEY, name TEXT, city TEXT, state TEXT, tax_rate_ppm INTEGER NOT NULL);
+-- tax_rate_ppm is parts per million so real rates with fractional basis points fit exactly, e.g.
+-- NJ 6.625% = 66250 ppm. bid/totals.py does tax_cents = subtotal_cents * tax_rate_ppm // 1_000_000
+-- (integer math; floor-half-even equivalent: $1,000.00 * 66250 / 1e6 = $66.25).  3 branches seeded.
 CREATE TABLE products (
   sku TEXT PRIMARY KEY, category TEXT NOT NULL,     -- dimensional_lumber | sheathing | drywall | insulation | roofing | fasteners | connectors | housewrap | trim
   name TEXT NOT NULL, description TEXT NOT NULL,
@@ -560,7 +563,7 @@ Examples to include (wording ours):
 ### 8.1 Semantic layer (`catalog/semantic/`)
 Single source of truth used by the pricing agent (as prompt context), the query builder, the analyst's spec validation, the orchestrator's `add_requirements` validation, unit conversions, and tests. Split into an OKF-style bundle so each concern lives in its own file; the loader in `catalog/semantic_layer.py` reads every file at startup and validates cross-references.
 
-**One file per table.** `products.yaml`, `stock.yaml`, `branches.yaml` each lead with front matter (`table`, `key`, `description`), then the fields and allowed values, then the joins that start at this entity. Example `products.yaml`:
+**One file per table.** `products.yaml`, `stock.yaml`, `branches.yaml` each lead with front matter (`table`, `key`, `description`), then the fields and allowed values, then the joins that start at this entity. An entity may also carry `agent_visible: false` in its front matter; the pricing agent's prompt context then omits that entity entirely (today used by `branches.yaml` — branches are code-only; the pricing agent never sees them). Example `products.yaml`:
 
 ```yaml
 table: products
@@ -687,15 +690,23 @@ At extraction time this is what §6.4.3 checks — a hit on our table sets `item
 
 **Conversion path.** Every successful conversion produces a `sale_qty` **and** a human-readable `conversion_path` string that records every step — e.g. `"12 yd² → 108 SF → 4 SHT (coverage 32 SF/sheet)"` or `"100 LF → 7 EA (length_ft = 16)"`. Stored on the `price_results` row (§5.1) and surfaced on the bid line (§9.1) so the estimator can audit the math without reading code.
 
-**`sanity_ranges.yaml`** (per-category guardrails for extracted quantities):
+**`sanity_ranges.yaml`** (per-(category, sale_unit) guardrails for post-conversion `sale_qty`):
 ```yaml
 sanity_ranges:
-  drywall:            {max_qty: 2000, unit: SHT}
-  dimensional_lumber: {max_qty: 20000, unit: EA}
-  sheathing:          {max_qty: 2000, unit: SHT}
-  insulation:         {max_qty: 500,  unit: BAG}
-  roofing:            {max_qty: 300,  unit: BDL}
+  drywall:
+    - {unit: SHT, max_qty: 2000}
+  dimensional_lumber:
+    - {unit: EA, max_qty: 20000}
+  sheathing:
+    - {unit: SHT, max_qty: 2000}
+  insulation:
+    - {unit: BAG,  max_qty: 500}
+    - {unit: ROLL, max_qty: 200}
+  roofing:
+    - {unit: BDL,  max_qty: 300}
+    - {unit: ROLL, max_qty: 60}       # underlayment rolls, separate from shingle bundles
 ```
+Each category maps to a list of entries keyed by `sale_unit`. The loader validates every `unit` against the `sale_unit` enum in `products.yaml`; an unknown value aborts startup.
 
 **`playbooks.yaml`** (prompt-only guidance for the pricing agent):
 ```yaml
@@ -713,18 +724,29 @@ playbooks:
     >= shortfall.
 ```
 
-**`named_queries.yaml`**:
+**`named_queries.yaml`** (code-only; not exposed as an agent tool):
 ```yaml
 named_queries:
-  stock_all_branches: {params: [sku], sql_ref: stock_all_branches}   # SQL lives in query_builder.py
+  stock_all_branches: {params: [sku], sql_ref: stock_all_branches}   # called by transfers.py on shortfall
 ```
 
-**`examples.yaml`** — few-shot for the pricing agent only:
+**`examples.yaml`** — few-shot for the pricing agent only. Each entry shows a request plus **both** the `query_catalog` input and the expected `submit_matches` entry, so the examples model the playbook rules (ambiguity → recorded assumption, substitution → reason, no-match → not forced):
 ```yaml
 examples:
   - request: "2x6x16 PT, 40 pcs"
-    query: {entity: products, filters: {nominal_size: "2x6", length_ft: 16, treatment: pressure_treated_ground_contact}, include_stock_for_branch: true}
+    query:
+      entity: products
+      filters: {nominal_size: "2x6", length_ft: 16}
+    match:
+      sku: "<picked sku>"
+      is_substitute: false
+      assumptions:
+        - field: treatment
+          value: pressure_treated_above_ground
+          reason: "'PT' is ambiguous — chose above-ground per playbook"
+      searched: "2x6 16ft pressure-treated"
 ```
+`include_stock_for_branch` is not part of `CatalogQuery` — the query builder always joins stock for the run's branch (§8.2), the same way it injects `active = 1`. Confidence drops to medium automatically whenever a `MatchProposal` carries any `assumptions` entry (§8.3 step 8).
 
 ### 8.2 Tools (Pricing Agent)
 - `query_catalog(CatalogQuery)`:
@@ -733,11 +755,12 @@ examples:
       entity: Literal["products"]
       filters: dict[str, str | int | bool]        # keys must be filterable fields; values must be allowed
       text_search: str | None = Field(None, max_length=60)   # LIKE over searchable fields, parameterized
-      include_stock_for_branch: bool = True
       limit: int = Field(20, ge=1, le=20)
+      # NOTE: no include_stock_for_branch. The query builder ALWAYS joins
+      # stock and injects the run's branch_id (same pattern as active = 1).
   ```
   `query_builder.py` validates against the YAML (unknown field / disallowed value / undefined join → rejected with a clear error the model can act on), then builds SQL where **identifiers come only from the YAML allowlist** and **values are bound parameters** (`?`). Every generated query against `products` has `active = 1` appended to its WHERE clause by the builder — `active` is never a filter the model (or anyone) can pass. Executes on the read-only connection. Row cap 20.
-- `run_named_query(name, params)` — only names defined in the YAML; SQL is pre-written in code.
+- **Named queries are code-only.** `semantic/named_queries.yaml` declares them (just `stock_all_branches` today) and `query_builder.py` holds their pre-written SQL, but the pricing agent cannot invoke them. The one caller is `agents/pricing/transfers.py`, which runs `stock_all_branches` from Python on each shortfall line to produce transfer options.
 - Final forced tool `submit_matches(PricingResponse)`:
   ```python
   class Assumption(BaseModel): field: str; value: str; reason: str = Field(max_length=200)
@@ -758,9 +781,13 @@ For each proposal:
 2. SKU must exist and be active in `catalog.db`; else status `no_match` with note `hallucinated_sku` (logged to `rejected_claims`).
 3. **Price, sale unit, name, stock are copied from the DB row.** The model never supplies a number.
 4. **Unit conversion in code** (`units.py`) via the dimensions registry loaded from `semantic/conversions.yaml`, per the selection algorithm in §8.1: identity passthrough if units match; otherwise run the first dimension whose `units` map contains `item.unit` AND whose `sale_units` entry for `product.sale_unit` has all `uses_fields` non-null on the catalog row. When `item.unit = NULL` and the item has note `unit_pint_convertible`, pint converts `unit_raw` to the dimension's base unit (allowlist-only, strictly length/area, per §8.1) and the normal sale-unit function runs. All math in `Decimal`; quantize **only the final quotient** to 6 decimal places before ceiling. Record a human-readable `conversion_path` (e.g. `"12 yd² → 108 SF → 4 SHT (coverage 32 SF/sheet)"`) and persist it. If no dimension applies and no pint route places the unit → `sale_qty = NULL` and `conversion_path = NULL`; **`unit_price_cents` is still copied from the catalog row** so the estimator can fill in a quantity and see the extended total; note `unit_conversion_unavailable` added to `verify_notes_json`, line flagged.
-5. **Sanity range check on `sale_qty`:** look up `sanity_ranges[product.category]` in `semantic/sanity_ranges.yaml`. If `sale_qty` is not NULL and `sale_qty > max_qty`, add note `sanity_range` to `verify_notes_json` and flag the line for review. The value is never auto-changed. Categories without a declared range, and lines with `sale_qty = NULL`, pass this check.
+5. **Sanity range check on `sale_qty`:** look up the entry in `sanity_ranges[product.category]` whose `unit` equals `product.sale_unit`. If no entry matches (unknown category, or the category has entries but none for this sale unit), skip the check. Otherwise, if `sale_qty` is not NULL and `sale_qty > max_qty`, add note `sanity_range` to `verify_notes_json` and flag the line for review. The value is never auto-changed. Lines with `sale_qty = NULL` pass this check. Example: a roofing underlayment line in ROLL is bounded by the ROLL entry (60), not the BDL shingle entry (300) — different sale units, different limits.
 6. **Attribute check:** every requirement and every stated spec is compared to product columns; mismatches recorded in `attribute_mismatches_json`.
-7. **Shortfall.** If `sale_qty` is NULL, `shortfall = NULL` (not 0); `branch_on_hand` is still populated so the UI can show stock. Otherwise `shortfall = max(sale_qty - on_hand(branch), 0)`; if positive, transfer options are computed by code (`stock_all_branches`) and the next receipt date is included.
+7. **Shortfall and transfers.** If `sale_qty` is NULL, `shortfall = NULL` (not 0); `branch_on_hand` is still populated so the UI can show stock. Otherwise `shortfall = max(sale_qty - on_hand(branch), 0)`. If `shortfall > 0`, `agents/pricing/transfers.py` calls the code-only `stock_all_branches` named query and writes `transfer_options_json` with these rules:
+   - **Exclude the run's own branch** — it already supplied `on_hand`; listing it again is noise.
+   - **Full-cover branches first**, sorted by `on_hand` descending. A branch with `on_hand >= shortfall` can cover the line alone.
+   - **Partial-cover branches after**, marked explicitly as `cover: "N of M"` (e.g. `"12 of 20"` when `on_hand=12` and `shortfall=20`). Also sorted by `on_hand` descending.
+   - Each entry carries `branch_id`, `on_hand`, `cover`, `next_receipt_date`, `next_receipt_qty`.
 8. **Confidence** (`confidence.py`, pure) — this is **match certainty**, nothing else. Review flags (`sanity_range`, `unit_conversion_unavailable`, shortfall, etc.) open review independently via `verify_notes_json`.
    - **high:** not a substitute; zero mismatches; zero assumptions on matchable fields; item `verified` and `read_via='text'`; unit resolved via our table (no pint).
    - **medium:** not a substitute; zero mismatches; but ≥1 assumption, item read via vision, **or unit resolved via the pint fallback** (reason: `"unit converted from <unit_raw> via pint"`).
@@ -791,7 +818,7 @@ class BidLine(BaseModel):
     review: ReviewState
     origins: dict[Literal["quantity","unit_price","sku","description"], Origin]
     override_reason: str | None = Field(None, max_length=200)
-class Totals(BaseModel): subtotal_cents: int; tax_rate_bps: int; tax_cents: int; total_cents: int; priced_lines: int; open_flags: int
+class Totals(BaseModel): subtotal_cents: int; tax_rate_ppm: int; tax_cents: int; total_cents: int; priced_lines: int; open_flags: int
 class Bid(BaseModel):
     run_id: str; kind: Literal["agent","draft","final"]; revision: int
     branch: BranchInfo; project: ProjectInfo
@@ -811,7 +838,7 @@ class Bid(BaseModel):
 1. Load items, latest triage, requirements, latest price result per item, conflicts.
 2. Sections: `price`-triaged materials → `lines`; `exclusion` → `exclusions` (no price, must carry source quote); `labor` → `labor` ("Not priced — for estimator"); `unreadable` → `unreadable`; `ambiguous`/untriaged → `lines` with open review.
 3. Review is **open** when any: item unverified; `quantity_not_in_quote`; `unknown_unit`; `sanity_range`; confidence `low`; status `no_match`/`failed`/`timeout`; shortfall > 0; substitute; involved in a conflict; not priced.
-4. `extended_cents = sale_qty * unit_price_cents` (Decimal, round half up to cents); totals and tax (branch `tax_rate_bps`) in `totals.py`.
+4. `extended_cents = sale_qty * unit_price_cents` (Decimal, round half up to cents); totals and tax (branch `tax_rate_ppm`) in `totals.py`.
 5. Validate the whole `Bid` with Pydantic; store as `kind='agent', revision=0` (immutable) and a copy as `kind='draft', revision=1`.
 6. Fallback path (no/invalid `submit_bid`, budget/deadline): same assembly, `generated_by='fallback'`, `summary` = a code template stating why (e.g. "Assembled automatically: orchestrator reached its step limit."), `partial_reasons` filled, run status `partial`.
 7. `no_materials` outcome: zero material/labor/exclusion items → run `completed`, outcome `no_materials`, no bid; UI shows a designed empty result.
@@ -1037,7 +1064,7 @@ Unit tests never call the real Anthropic API. Use `FakeLLM` (scripted responses 
 - **Loader.** Semantic-layer startup aborts when a dimension names a missing function, a missing `uses_fields` name, when declared fields in `<table>.yaml` do not exactly match the real columns in `catalog.db`, or when `catalog.db` is absent (message: `"Catalog not built — run make seed"`).
 - `add_requirements`: unknown item id rejected; field not matchable rejected; value not allowed rejected; **items table byte-identical before/after**; UPDATE on items raises (trigger).
 - Semantic layer / query builder: unknown field rejected; disallowed value rejected; undefined join rejected; value `"'; DROP TABLE products;--"` returns 0 rows and tables intact; write attempt on read-only connection raises; row cap enforced.
-- Pricing verify: hallucinated SKU → `no_match` + rejected_claims row; price always from DB even if proposal tried to include one (extra fields forbidden); confidence high/medium/low cases incl. substitute and mismatch; shortfall + transfer options correct. **Sanity-range check**: `sale_qty > sanity_ranges[category].max_qty` adds `sanity_range` to `verify_notes_json` and opens review (never auto-changes the quantity; does not change confidence by itself). **Pint fallback (exact assertion)**: an item with `unit_raw = "10 meters"`, `unit = NULL`, and `verification_notes` containing `unit_pint_convertible`, priced against a product with `sale_unit = EA` and `length_ft = 8`, yields `sale_qty = 5`, `confidence = "medium"` with reason `"unit converted from \"10 meters\" via pint"`, and `conversion_path = "10 m → 32.8084 LF → 5 EA (length_ft = 8)"`. **Conversion failure**: `unit_conversion_unavailable` leaves `sale_qty = NULL` and `conversion_path = NULL` **but keeps `unit_price_cents` from the catalog row**; `shortfall = NULL`, `branch_on_hand` still populated.
+- Pricing verify: hallucinated SKU → `no_match` + rejected_claims row; price always from DB even if proposal tried to include one (extra fields forbidden); confidence high/medium/low cases incl. substitute and mismatch; shortfall + transfer options correct. **Sanity-range check**: when the entry under `sanity_ranges[category]` with `unit == product.sale_unit` has `max_qty` smaller than `sale_qty`, note `sanity_range` is appended to `verify_notes_json` and the line opens review (never auto-changes the quantity; does not change confidence by itself). Example test: 40 ROLL of roofing underlayment is bounded only by roofing's ROLL entry (60), so it passes — the BDL entry (300) is irrelevant. 400 BDL of shingles is flagged. **Pint fallback (exact assertion)**: an item with `unit_raw = "10 meters"`, `unit = NULL`, and `verification_notes` containing `unit_pint_convertible`, priced against a product with `sale_unit = EA` and `length_ft = 8`, yields `sale_qty = 5`, `confidence = "medium"` with reason `"unit converted from \"10 meters\" via pint"`, and `conversion_path = "10 m → 32.8084 LF → 5 EA (length_ft = 8)"`. **Conversion failure**: `unit_conversion_unavailable` leaves `sale_qty = NULL` and `conversion_path = NULL` **but keeps `unit_price_cents` from the catalog row**; `shortfall = NULL`, `branch_on_hand` still populated.
 - `submit_bid`: dollar amount in summary rejected; commitment wording rejected; question without valid basis dropped; assumption for unknown item dropped.
 - Conflicts: unverified quote side → rejected; unknown type → rejected.
 - Spotlight: embedded closing tag is escaped; tag name random per call.
