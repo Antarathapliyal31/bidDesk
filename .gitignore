@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+backend/.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+frontend/dist/
+
+# Env & secrets
+.env
+.env.local
+
+# App data (seeded DBs, uploads)
+backend/data/*.db
+backend/data/uploads/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Vitest / coverage
+coverage/
