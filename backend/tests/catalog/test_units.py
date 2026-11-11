@@ -261,7 +261,10 @@ class TestConversionFunctions:
         assert squares_to_bundles(Decimal("1200"), pack_qty=3) == 36
 
     def test_squares_to_bundles_exact_round(self) -> None:
-        # 1 SQ = 100 SF; pack_qty=3 → ceil(100/100 * 3) = 3 (not 4 — 6-dp quantize matters)
+        # 1 SQ = 100 SF; pack_qty=3 → 100/100 * 3 = 3 exactly. Without
+        # the 6-dp quantize, float-ish Decimal multiplies can leave a
+        # trailing "3.000000...1" that ceiling would push to 4. The
+        # late-quantize-then-ceil path pins this to 3.
         assert squares_to_bundles(Decimal("100"), pack_qty=3) == 3
 
     def test_board_feet_1000bf_2x6x16_is_63(self) -> None:
@@ -271,6 +274,13 @@ class TestConversionFunctions:
     def test_board_feet_2000bf_2x6x16_is_125(self) -> None:
         # 2 MBF = 2000 BF; 2000/16 = 125 exact
         assert board_feet_to_pieces(Decimal("2000"), nominal_size="2x6", length_ft=16) == 125
+
+    def test_board_feet_16bf_2x4x8_is_3(self) -> None:
+        # bf_per_piece(2x4x8) = (2 * 4 * 8) / 12 = 16/3 ≈ 5.333…
+        # 16 / (16/3) = 3 exactly in rationals, but naive Decimal division
+        # yields 3.000000000…1 and a straight ceil pushes it to 4. The
+        # 6-dp quantize before ceil is what pins this to 3.
+        assert board_feet_to_pieces(Decimal("16"), nominal_size="2x4", length_ft=8) == 3
 
     def test_zero_divisor_raises(self) -> None:
         with pytest.raises(ValueError, match="length_ft must be > 0"):

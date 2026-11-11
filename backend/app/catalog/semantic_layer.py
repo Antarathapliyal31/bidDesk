@@ -62,7 +62,9 @@ class JoinDef(BaseModel):
 class Entity(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    table: str
+    # Table name must look like a safe SQL identifier so a YAML typo can't
+    # introduce quoting or injection surface in query_builder.py.
+    table: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     key: list[str] = Field(min_length=1)
     agent_visible: bool = True
     description: str = Field(min_length=1)
@@ -121,9 +123,18 @@ class SanityRange(BaseModel):
 class NamedQuery(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    params: list[str]
-    sql_ref: str
+    # sql_ref must be a known key in NAMED_QUERY_SIGNATURES (checked by
+    # _validate_named_queries) and params must match that signature exactly.
+    params: list[str] = Field(min_length=1)
+    sql_ref: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_]*$")
     description: str | None = None
+
+
+# Registry of code-side named-query SQL signatures. query_builder.py (Phase 5)
+# will hold the actual SQL; the loader validates the YAML references here.
+NAMED_QUERY_SIGNATURES: dict[str, list[str]] = {
+    "stock_all_branches": ["sku"],
+}
 
 
 class ExampleQuery(BaseModel):
@@ -206,6 +217,10 @@ def _load_dimensions(path: Path) -> list[Dimension]:
     raw = _read_yaml(path)
     if "dimensions" not in raw:
         raise SemanticLayerError(f"{path.name}: missing top-level 'dimensions' key")
+    if not isinstance(raw["dimensions"], dict):
+        raise SemanticLayerError(
+            f"{path.name}: 'dimensions' must be a mapping, got {type(raw['dimensions']).__name__}"
+        )
     out: list[Dimension] = []
     for name, spec in raw["dimensions"].items():
         where = f"{path.name}: dimension {name!r}"
@@ -248,6 +263,11 @@ def _load_sanity_ranges(path: Path) -> dict[str, list[SanityRange]]:
     raw = _read_yaml(path)
     if "sanity_ranges" not in raw:
         raise SemanticLayerError(f"{path.name}: missing top-level 'sanity_ranges' key")
+    if not isinstance(raw["sanity_ranges"], dict):
+        raise SemanticLayerError(
+            f"{path.name}: 'sanity_ranges' must be a mapping, got "
+            f"{type(raw['sanity_ranges']).__name__}"
+        )
     out: dict[str, list[SanityRange]] = {}
     for category, entries in raw["sanity_ranges"].items():
         if not isinstance(entries, list):
@@ -269,6 +289,10 @@ def _load_playbooks(path: Path) -> dict[str, str]:
     raw = _read_yaml(path)
     if "playbooks" not in raw:
         raise SemanticLayerError(f"{path.name}: missing top-level 'playbooks' key")
+    if not isinstance(raw["playbooks"], dict):
+        raise SemanticLayerError(
+            f"{path.name}: 'playbooks' must be a mapping, got {type(raw['playbooks']).__name__}"
+        )
     out: dict[str, str] = {}
     for name, body in raw["playbooks"].items():
         if not isinstance(body, str):
@@ -281,6 +305,10 @@ def _load_examples(path: Path) -> list[Example]:
     raw = _read_yaml(path)
     if "examples" not in raw:
         raise SemanticLayerError(f"{path.name}: missing top-level 'examples' key")
+    if not isinstance(raw["examples"], list):
+        raise SemanticLayerError(
+            f"{path.name}: 'examples' must be a list, got {type(raw['examples']).__name__}"
+        )
     return [
         _validate_or_raise(Example, e, f"{path.name}[{i}]") for i, e in enumerate(raw["examples"])
     ]
@@ -290,6 +318,11 @@ def _load_named_queries(path: Path) -> dict[str, NamedQuery]:
     raw = _read_yaml(path)
     if "named_queries" not in raw:
         raise SemanticLayerError(f"{path.name}: missing top-level 'named_queries' key")
+    if not isinstance(raw["named_queries"], dict):
+        raise SemanticLayerError(
+            f"{path.name}: 'named_queries' must be a mapping, got "
+            f"{type(raw['named_queries']).__name__}"
+        )
     return {
         name: _validate_or_raise(NamedQuery, spec, f"{path.name}: {name}")
         for name, spec in raw["named_queries"].items()
@@ -311,6 +344,11 @@ def _allowed_values(field: FieldDef) -> set[Any]:
 
 
 _UNIT_ENUM_VALUES: set[str] = {u.value for u in Unit}
+
+# EA is the one sale_unit that legitimately appears in multiple dimensions
+# (pieces from length-dimension LF, pieces from board_measure BF/MBF). All
+# other sale_units must appear in exactly one dimension.
+_CROSS_DIMENSION_SALE_UNITS: set[str] = {"EA"}
 
 
 def _validate_dimensions(dimensions: list[Dimension], products: Entity) -> None:
@@ -354,6 +392,41 @@ def _validate_dimensions(dimensions: list[Dimension], products: Entity) -> None:
                         f"{sale_unit_name!r}: uses_fields references {f!r} which is "
                         f"not a declared field on products"
                     )
+
+    # Cross-dimension sale-unit uniqueness. EA is the one legitimate case
+    # (pieces from LF, pieces from BF/MBF); everything else must land in
+    # exactly one dimension.
+    seen_sale_units: dict[str, str] = {}
+    for dim in dimensions:
+        for sale_unit_name in dim.sale_units:
+            if sale_unit_name in _CROSS_DIMENSION_SALE_UNITS:
+                continue
+            if sale_unit_name in seen_sale_units:
+                raise SemanticLayerError(
+                    f"conversions.yaml: sale_unit {sale_unit_name!r} appears in "
+                    f"both {seen_sale_units[sale_unit_name]!r} and {dim.name!r} "
+                    f"dimensions; only {sorted(_CROSS_DIMENSION_SALE_UNITS)} may "
+                    f"appear in multiple dimensions"
+                )
+            seen_sale_units[sale_unit_name] = dim.name
+
+
+def _validate_named_queries(named_queries: dict[str, NamedQuery]) -> None:
+    """Every sql_ref must resolve to a signature in NAMED_QUERY_SIGNATURES
+    and the YAML `params` must match that signature exactly."""
+    for name, nq in named_queries.items():
+        if nq.sql_ref not in NAMED_QUERY_SIGNATURES:
+            raise SemanticLayerError(
+                f"named_queries.yaml: {name!r} sql_ref {nq.sql_ref!r} is not "
+                f"registered in NAMED_QUERY_SIGNATURES "
+                f"(known: {sorted(NAMED_QUERY_SIGNATURES)})"
+            )
+        expected = NAMED_QUERY_SIGNATURES[nq.sql_ref]
+        if nq.params != expected:
+            raise SemanticLayerError(
+                f"named_queries.yaml: {name!r} params {nq.params!r} don't match "
+                f"sql_ref {nq.sql_ref!r} signature {expected!r}"
+            )
 
 
 def _validate_synonyms(entities: dict[str, Entity]) -> None:
@@ -557,6 +630,7 @@ def load_bundle(bundle_dir: Path, catalog_db: Path) -> SemanticBundle:
     _validate_sanity_ranges(sanity_ranges, products)
     _validate_joins(entities)
     _validate_columns_match_db(entities, catalog_db)
+    _validate_named_queries(named_queries)
     _validate_examples(examples, products, catalog_db)
 
     return SemanticBundle(

@@ -590,3 +590,89 @@ class TestEntityShape:
         broken = _clone_bundle(tmp_path, {"products.yaml": mutate})
         with pytest.raises(SemanticLayerError, match=r"(?s)products\.yaml.*description"):
             load_bundle(broken, catalog_db)
+
+    def test_table_identifier_bad_chars_rejected(self, tmp_path: Path, catalog_db: Path) -> None:
+        # Safe-identifier regex rejects quotes / semicolons / spaces, so
+        # a malicious YAML can't inject SQL into query_builder.py (Phase 4).
+        def mutate(s: str) -> str:
+            return s.replace("table: products", 'table: "products; DROP TABLE x"', 1)
+
+        broken = _clone_bundle(tmp_path, {"products.yaml": mutate})
+        with pytest.raises(SemanticLayerError, match=r"(?s)products\.yaml.*table"):
+            load_bundle(broken, catalog_db)
+
+
+# ---------------------------------------------------------------------------
+# Section-type isinstance checks on top-level YAML
+# ---------------------------------------------------------------------------
+
+
+class TestSectionTypes:
+    def test_dimensions_as_list_rejected(self, tmp_path: Path, catalog_db: Path) -> None:
+        def mutate(_s: str) -> str:
+            # Replace the whole file with `dimensions: []` so the top-level
+            # `dimensions` key exists but is the wrong type.
+            return "dimensions:\n  - length\n  - area\n"
+
+        broken = _clone_bundle(tmp_path, {"conversions.yaml": mutate})
+        with pytest.raises(SemanticLayerError, match=r"'dimensions' must be a mapping"):
+            load_bundle(broken, catalog_db)
+
+
+# ---------------------------------------------------------------------------
+# Sale-unit uniqueness across dimensions
+# ---------------------------------------------------------------------------
+
+
+class TestSaleUnitUniqueness:
+    def test_ea_in_two_dimensions_is_allowed(self, tmp_path: Path, catalog_db: Path) -> None:
+        # EA is the one sale_unit the loader exempts — it legitimately
+        # appears in BOTH length (lineal-feet input) AND board_measure
+        # (board-feet input) because the same 2x4x8 can be ordered either
+        # way. The shipped bundle already has EA in both; this test is a
+        # positive assertion that the exemption is wired.
+        bundle = load_bundle(_BUNDLE_DIR, catalog_db)
+        dims_with_ea = {dim.name for dim in bundle.dimensions if "EA" in dim.sale_units}
+        assert dims_with_ea == {"length", "board_measure"}
+
+    def test_sht_in_both_dimensions_rejected(self, tmp_path: Path, catalog_db: Path) -> None:
+        # Add SHT to the length dimension so it appears in BOTH length
+        # AND area (where it legitimately lives). Validator must reject.
+        def mutate(s: str) -> str:
+            return s.replace(
+                "    sale_units:\n      EA:\n        function: length_to_pieces\n"
+                "        uses_fields: [length_ft]",
+                "    sale_units:\n      EA:\n        function: length_to_pieces\n"
+                "        uses_fields: [length_ft]\n"
+                "      SHT:\n        function: length_to_pieces\n"
+                "        uses_fields: [length_ft]",
+                1,
+            )
+
+        broken = _clone_bundle(tmp_path, {"conversions.yaml": mutate})
+        with pytest.raises(SemanticLayerError, match=r"sale_unit 'SHT' appears in both"):
+            load_bundle(broken, catalog_db)
+
+
+# ---------------------------------------------------------------------------
+# named_queries: sql_ref + params signature
+# ---------------------------------------------------------------------------
+
+
+class TestNamedQueries:
+    def test_unknown_sql_ref_rejected(self, tmp_path: Path, catalog_db: Path) -> None:
+        def mutate(s: str) -> str:
+            return s.replace("sql_ref: stock_all_branches", "sql_ref: ghost_query", 1)
+
+        broken = _clone_bundle(tmp_path, {"named_queries.yaml": mutate})
+        with pytest.raises(SemanticLayerError, match=r"ghost_query"):
+            load_bundle(broken, catalog_db)
+
+    def test_param_mismatch_rejected(self, tmp_path: Path, catalog_db: Path) -> None:
+        # stock_all_branches signature is ["sku"]; swap to ["branch_id"].
+        def mutate(s: str) -> str:
+            return s.replace("params: [sku]", "params: [branch_id]", 1)
+
+        broken = _clone_bundle(tmp_path, {"named_queries.yaml": mutate})
+        with pytest.raises(SemanticLayerError, match=r"params.*don't match"):
+            load_bundle(broken, catalog_db)
