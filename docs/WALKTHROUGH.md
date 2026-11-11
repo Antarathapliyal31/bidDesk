@@ -162,6 +162,176 @@ with generator, four PDFs/text, four expected JSONs.
 
 ---
 
+## Phase 2 — Runtime core
+
+### Step 1 — Contracts package
+
+Every value that crosses an agent, tool, HTTP or SSE edge is a
+Pydantic v2 model from `app/contracts/`. Models use `extra="forbid"`
+(strays raise); numeric and boolean invariants use `StrictInt` /
+`StrictBool` via `Cents` / `Count` aliases.
+
+- `app/contracts/__init__.py` — barrel; re-exports every public
+  symbol so call sites write `from app.contracts import Bid`.
+- `app/contracts/common.py` — `Contract` base, `DecimalStr` (string
+  ⇄ Decimal, rejects NaN / Infinity), `Cents` / `Count`, 14 StrEnums,
+  `SourceRef` (blank quote normalizes to None; vision needs a page
+  and can't be verified; verified needs text + page + non-empty
+  quote), `BidDiff`.
+- `app/contracts/items.py` — `ItemView` (payload of `item.extracted`
+  SSE event) + regex-constrained `ItemNote` that allows the dynamic
+  `invalid_spec:<field>` form; validator pins `quote_not_found ⇒
+  source.verified=False`.
+- `app/contracts/pricing.py` — `PricedLineView` (live `item.priced`
+  payload), `MatchAssumption` (`value: str | int | bool`),
+  `MatchInfo` (status=substitute ⇔ is_substitute=True), `StockInfo`
+  (shortfall=0 forbids transfer_options; per-option
+  covers_shortfall consistency; enforces SPEC §13 sort),
+  `TransferOption`, `sort_transfer_options`, `RepriceProposal`.
+- `app/contracts/bid.py` — `RequirementView` (value XOR value_in),
+  `ReviewState`, `Origins`, `ExclusionLine`, `LaborLine` (optional
+  source), `UnreadableLine`, `AssumptionView`,
+  `ContractorQuestionView`, `ConflictSide` via SourceRef,
+  `ConflictView` (both sides verified), `BranchInfo`,
+  `ProjectInfo`, `Totals`, `BidLine`, `Bid`.
+  `extended_cents_of` / `tax_cents_of` helpers. BidLine invariants:
+  `extended = ROUND_HALF_UP(qty × price)`; `agent`-origin price =
+  catalog price AND catalog must exist (golden rule 4);
+  matched/substitute requires price; override_reason required when
+  user_overridden, forbidden otherwise; user_overridden requires a
+  catalog price. Bid invariants: revision-0 reserved for
+  kind=agent; totals follow branch tax_rate_ppm; subtotal = Σ
+  extended; tax half-up per DECISIONS #11; priced_lines and
+  open_flags match counts.
+- `app/contracts/events.py` — `RunEvent` discriminated union over
+  18 event types. Notes-to-frontend header pins the three deltas
+  vs `API_CONTRACT.md` (budget literal + optional snapshot;
+  nullable current_step / label / message; `reason_code: ReviewReason`).
+- `app/contracts/errors.py` — `ApiError` + 14-code `ErrorCode`.
+  Typed subclasses for `too_large` (size ceiled to 0.1 MB),
+  `too_many_pages`, `text_too_long`, `stale_revision`,
+  `open_flags`. Base rejects construction with `network_error` /
+  `server_error` (client-synthesized per SPEC §13).
+- `app/contracts/delegate.py` — `AgentTask` / `AgentResult`
+  (Contract + Generic), lenient `AgentError` (message truncates;
+  detail coerced via `default=str`; oversize →
+  `{truncated, bytes}`), lenient `ValidationFeedback` (truncates to
+  10 × 300 chars on the retry path, never raises). AgentResult
+  status invariants enforced; partial requires `ref` on every error.
+- Tests: `tests/contracts/{__init__,test_strict_fields,test_bid_line_invariants,test_match_info,test_delegate_contracts}.py`
+  — 75 cases covering numeric/boolean strictness, BidLine logical
+  invariants (agent/catalog price loophole closed), MatchInfo
+  substitute biconditional, delegate envelope status rules + JSON
+  round-trips.
+
+### Step 2 — DB schema + repo
+
+Two-connection aiosqlite layer. Writes serialize behind one
+`asyncio.Lock`; reads go through a parallel connection with
+`PRAGMA query_only=ON` so a bug can't accidentally write through
+them. WAL gives readers real concurrency.
+
+- `app/db/__init__.py` — package marker.
+- `app/db/schema.sql` — every SPEC §5.1 table + `item_requirements`
+  with `value_json` + `read_via`. All CHECK constraints named
+  `<table>_<rule>_ck` so test errors pin the exact rule
+  (`items_verified_ck`, `items_vision_ck`,
+  `item_requirements_quote_verified_ck`,
+  `item_requirements_vision_ck`, `bids_agent_revision_ck`, …).
+  Triggers: items / item_requirements / bid_edits are insert-only
+  (UPDATE + DELETE abort); agent-rev-0 and final bids are
+  immutable. Foreign keys everywhere: per-item tables
+  (item_triage / item_requirements / price_results) reference
+  `items(run_id, id)`; per-run children (documents / pages /
+  conflicts / events / bids / bid_edits) reference `runs(id)`.
+  `events` has composite indexes on `(run_id, id)` and
+  `(type, ts)`.
+- `app/db/init.py` — `Database` dataclass (write conn + read conn +
+  `asyncio.Lock`) and `db.write()` context manager (commits on
+  clean exit; rolls back + re-raises on exception). Startup steps
+  (`apply_schema`, `configure_pragmas`,
+  `mark_running_as_interrupted` — one `UPDATE … RETURNING id`
+  statement) exposed so tests drive them directly.
+  `open_app_db(path, now_iso=…)` yields
+  `(Database, interrupted_run_ids)` so the lifespan emits one
+  `run.finished(status="interrupted")` per id once the event bus
+  is live (step 3).
+- `app/db/repo.py` — narrow typed write functions paired as
+  `_insert_foo(conn, …)` (inner) + `insert_foo(db, …)` (public,
+  acquires `db.write()`). Compose inners for multi-write
+  transactions (e.g. draft bid update + bid_edit append both
+  commit or both roll back). `_append_event` is private — only
+  the event bus (step 3) is allowed to write events, and only
+  after validating a `RunEvent`; publishes to subscribers
+  AFTER commit.
+- Tests under `tests/db/`:
+  - `conftest.py` — `db` fixture (fresh file-backed DB per test)
+    and `db_with_interrupted` (seeds a running run, reopens).
+    Seed helpers (`seed_run`, `seed_run_and_item`) route every
+    insert through `repo.py` per review rule 7.
+  - `test_schema.py` — tables, WAL + foreign_keys on write conn,
+    query_only on read conn, read conn rejects writes.
+  - `test_triggers.py` — items / item_requirements / bid_edits
+    insert-only; agent + final bid immutable; drafts mutable;
+    `value_json` stores scalar OR list verbatim.
+  - `test_checks.py` — every named CHECK, matched by name;
+    vision / null-page / empty-quote / whitespace-quote /
+    agent-rev≠0 / draft-rev-0 variants.
+  - `test_foreign_keys.py` — baseline accept + parametrized
+    missing-parent sweep across item_triage, price_results,
+    documents, pages, conflicts, events, bids, bid_edits.
+  - `test_startup_interrupt.py` — flipped ids reported;
+    completed + failed runs keep their status + finished_at on
+    reopen; empty list on a clean DB.
+  - `test_write_lock.py` — concurrent writers: A's rollback
+    doesn't eat B's write (fails without the lock); reader
+    isolation mid-transaction; multi-write rollback + commit
+    mirror.
+
+### How to run it
+```
+make seed            # unchanged — catalog DB
+make test            # now 420 passed, 2 skipped
+make check           # ruff + full test sweep
+```
+
+### How to explain this (interview talking points)
+- **Key idea: typed boundaries front, trigger-enforced invariants
+  back.** The Pydantic contracts prevent bad data from ever
+  entering memory; the DB CHECKs + triggers prevent bad data from
+  ever persisting, even if someone bypasses the repo. Three
+  disciplines stacked: shape (Pydantic), identity (StrictInt /
+  StrictBool), SQL (CHECK / trigger / FK).
+- **Main trade-off (two connections, one lock).** We open two
+  aiosqlite connections — write and read — so SQLite WAL can give
+  readers real concurrency. Writes serialize behind an
+  `asyncio.Lock` so two coroutines on the shared write connection
+  can't flush each other's partial work. Reader isolation is
+  tested directly (reads see the pre-commit state mid-transaction).
+- **Likely interviewer question — "What happens if the server
+  crashes mid-run?"** On startup, one
+  `UPDATE runs SET status='interrupted' … WHERE status='running'
+  RETURNING id` flips every orphan run and returns the ids. The
+  lifespan then emits one `run.finished(status="interrupted")`
+  per id once the event bus is up, so the history page shows the
+  run as interrupted and the trace is honest. Resume is stretch
+  (SPEC §1.3); the user re-uploads if they want a new attempt.
+- **Likely interviewer question — "Why not enforce everything in
+  Python and skip the DB CHECKs?"** Because the repo isn't the
+  only path. A migration script, a SQL console, or a bug could
+  write past the repo; the CHECK fires in the SQL engine, not in
+  the application. Named CHECKs (`<table>_<rule>_ck`) let the
+  error message pin the exact rule, so operational issues surface
+  loudly.
+
+### Files added in Phase 2 (steps 1–2)
+Backend: `app/contracts/{__init__,common,items,pricing,bid,events,errors,delegate}.py`,
+`app/db/{__init__,init,repo}.py` + `app/db/schema.sql`.
+Tests: `tests/contracts/{__init__,test_strict_fields,test_bid_line_invariants,test_match_info,test_delegate_contracts}.py`,
+`tests/db/{__init__,conftest,test_schema,test_triggers,test_checks,test_foreign_keys,test_startup_interrupt,test_write_lock}.py`.
+
+---
+
 # Phase 6 (frontend-shell branch)
 
 ## docs/API_CONTRACT.md (new, temporary)

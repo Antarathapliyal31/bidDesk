@@ -31,6 +31,7 @@ from pydantic import (
     PlainSerializer,
     StrictBool,
     StrictInt,
+    field_validator,
     model_validator,
 )
 
@@ -240,12 +241,31 @@ class SourceRef(Contract):
     read_via: ReadVia | None = None
     verified: StrictBool
 
+    @field_validator("quote", mode="before")
+    @classmethod
+    def _blank_quote_to_none(cls, v: Any) -> Any:
+        # An empty or whitespace-only quote is semantically "no quote".
+        # Normalizing to None here lets the model validator and
+        # downstream tests pattern-match on `quote is None` instead
+        # of also checking `quote.strip()`.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @model_validator(mode="after")
-    def _verified_requires_text_match(self) -> SourceRef:
-        # An empty or whitespace-only `quote` is treated as missing —
-        # a "verified" SourceRef must point at actual text on the page.
-        quote_present = bool(self.quote and self.quote.strip())
-        if self.verified and (not quote_present or self.page is None or self.read_via != "text"):
+    def _verified_and_vision_rules(self) -> SourceRef:
+        # read_via='vision' checked FIRST so a vision+verified SourceRef
+        # fails with the specific "vision cannot be 'verified'" message
+        # rather than the general verified-rule message.
+        if self.read_via == "vision":
+            if self.page is None:
+                raise ValueError("read_via='vision' requires a page")
+            if self.verified:
+                raise ValueError("read_via='vision' cannot be 'verified'")
+        # verified=True promises a text-match citation: a text read
+        # on a page with a non-empty quote. (The blank-quote
+        # normalizer above has already turned "" / "   " into None.)
+        if self.verified and (self.quote is None or self.page is None or self.read_via != "text"):
             raise ValueError(
                 "verified=True requires a non-empty quote, page and "
                 "read_via='text' (vision quotes are never 'verified')"

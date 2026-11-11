@@ -428,6 +428,55 @@ an open-flag line that the estimator must resolve. UI copy needs to
 explain why, so the estimator doesn't treat the flag as "something
 the agent broke". Encoded alongside DECISIONS #16's conflict rule.
 
+## 18. Run status "interrupted" on server restart — 2026-11-11
+Decision: On startup, every run with `status='running'` is flipped
+to `status='interrupted'` in one `UPDATE … RETURNING id` statement
+(`db.init.mark_running_as_interrupted`). The lifespan receives the
+list of flipped ids and emits one `run.finished(status="interrupted",
+outcome="error", outcome_detail="Interrupted by server restart")`
+per id once the event bus is up (Phase 2 step 3). The run row's
+`outcome` is set to `'error'` and `finished_at` to the startup
+timestamp.
+Because: SPEC §10.5 names `interrupted` as the fate of any run that
+the server was in the middle of when it crashed/restarted. Making
+the status flip on startup (not on next SSE subscribe, not lazily)
+keeps the trace honest: the history page shows the run as
+interrupted even if no client ever reconnects. `UPDATE … RETURNING`
+is one statement so the status flip and the id-collection can't
+race (a SELECT-then-UPDATE would).
+Alternatives considered: Delete the run (loses the audit trail);
+mark it `failed` (lies — it wasn't the run's fault); leave it
+`running` and timeout later (opens a long window where the UI
+shows a spinner forever).
+Trade-off / known downside: Resume is stretch (SPEC §1.3); an
+interrupted run doesn't continue after restart. Acceptable because
+the UI makes the interruption visible and the user can re-upload.
+
+## 19. Lane/span "interrupted" semantics on `run.finished` — 2026-11-11
+Decision: On any `run.finished` whose `status` is NOT `completed`
+(i.e. `partial`, `failed`, or `interrupted`), the frontend
+`runReducer` closes every still-running span with
+`state='interrupted'` and flips every agent lane with
+`state='working'` to `state='interrupted'`. Lanes that had already
+`failed` keep their failed state + errorKind. Spans that had
+finished keep their recorded duration and summary. **Current gap:
+`runReducer.ts` currently only sets `terminal=true` for `partial`
+and `failed`; it does NOT include `interrupted`. That flows
+through to this decision and must be fixed in a frontend session.**
+Because: A span that was mid-flight when the run ended didn't
+*finish* — rendering it as "finished" would lie about what
+happened. The UI needs the three-way distinction (completed /
+interrupted / failed) so the history view and the live trace stay
+truthful (review rule 5: truthful terminal states).
+Alternatives considered: Collapse `interrupted` into `failed` in
+the reducer (loses the "we cut it off at restart" nuance — the
+trace should distinguish). Compute terminal-ness per span by
+timestamp (fragile, needs the server to tell us what happened).
+Trade-off / known downside: One more state in the lane/span
+discriminated union. The styling and copy need to differ enough
+from `failed` that estimators don't confuse them; the design
+tokens include a neutral "interrupted" color for this.
+
 ---
 
 ## Frontend entries (F1–F5)

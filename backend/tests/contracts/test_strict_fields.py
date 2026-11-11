@@ -165,10 +165,11 @@ class TestStrictBoolField:
 
 class TestSourceRefSemantics:
     def test_empty_quote_rejected_when_verified(self) -> None:
+        # Empty quote normalizes to None, then the verified rule
+        # fires on the missing quote.
         kwargs = {**_source_ref_kwargs(), "quote": ""}
         with pytest.raises(ValidationError) as exc:
             SourceRef(**kwargs)
-        # Model-wide validator; loc is the model root.
         assert any("verified=True" in e["msg"] for e in exc.value.errors())
 
     def test_whitespace_quote_rejected_when_verified(self) -> None:
@@ -177,16 +178,42 @@ class TestSourceRefSemantics:
             SourceRef(**kwargs)
         assert any("verified=True" in e["msg"] for e in exc.value.errors())
 
+    def test_blank_quote_normalizes_to_none(self) -> None:
+        # A blank quote on an unverified ref stores as None, so
+        # downstream code can pattern-match on `quote is None`
+        # without also stripping.
+        for blank in ("", "   ", "\t\n"):
+            ref = SourceRef(page=5, quote=blank, read_via="vision", verified=False)
+            assert ref.quote is None, f"quote={blank!r} should normalize to None"
+
     def test_empty_quote_fine_when_unverified(self) -> None:
-        # A vision-read or absent quote is allowed as long as verified=False.
         SourceRef(page=None, quote=None, read_via=None, verified=False)
-        SourceRef(page=1, quote="", read_via="vision", verified=False)
 
     def test_page_must_be_ge_1(self) -> None:
         kwargs = {**_source_ref_kwargs(), "page": 0}
         with pytest.raises(ValidationError) as exc:
             SourceRef(**kwargs)
         assert ("page",) in _locs(exc.value)
+
+    def test_vision_without_page_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="read_via='vision' requires a page"):
+            SourceRef(page=None, quote=None, read_via="vision", verified=False)
+
+    def test_vision_with_page_and_no_quote_accepted(self) -> None:
+        # Vision quotes are optional — OCR may not surface one.
+        ref = SourceRef(page=5, quote=None, read_via="vision", verified=False)
+        assert ref.quote is None
+
+    def test_vision_with_page_and_empty_quote_accepted(self) -> None:
+        # Empty-string quote normalizes to None on the vision path.
+        ref = SourceRef(page=1, quote="", read_via="vision", verified=False)
+        assert ref.quote is None
+
+    def test_vision_cannot_be_verified(self) -> None:
+        # The vision rule is checked BEFORE the verified rule, so
+        # this is the single expected message.
+        with pytest.raises(ValidationError, match=r"read_via='vision' cannot be 'verified'"):
+            SourceRef(page=1, quote="x", read_via="vision", verified=True)
 
 
 # ---------------------------------------------------------------------------

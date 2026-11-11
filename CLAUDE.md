@@ -82,3 +82,16 @@ make check-contract # fail if generated contract files are stale
 
 ## 7. Explaining your work
 Antara will be asked to walk through code on both sides live. After each phase, in the summary, add a short **"How to explain this"** section: 3–6 bullets on the key idea, the main trade-off, and one likely interviewer question with a good answer.
+
+## 8. Review rules (from Phase 2 reviews)
+
+1. **Error paths never raise:** objects built while handling an error (`AgentError`, `ValidationFeedback`, envelopes) truncate/coerce oversize or odd input instead of rejecting it.
+2. **Rejection tests:** build a valid baseline, assert it validates, change ONE field, assert the error names that field/rule. No circular assertions (never compare a value to the constant it was built from).
+3. **Golden rules have no loopholes:** a price marked origin `"agent"` must equal a catalog price that exists; `verified=True` only for `read_via="text"` with a non-empty quote and page — fixtures included.
+4. **Cross-layer change = one change:** adding/renaming an enum value, status, or event field updates the backend contract, frontend types, `runReducer`, and DB CHECK constraints together. List all four in the report.
+5. **Truthful terminal states:** `"done"`/`"finished"` only when work completed; cut-off work is `"interrupted"`; never show `0` when the value is unknown (use `null`/—).
+6. **Don't drop obligations:** a function result that something must act on (e.g. interrupted run ids) is consumed or passed on, with a test.
+7. **Shared aiosqlite connection:** every write transaction goes through `repo.py` under one `asyncio.Lock`.
+8. **Fixtures and samples:** counts/ids/SKUs come from `samples/expected/*.json`, never hand-typed.
+9. **Before reporting:** run the FULL suite + lint + typecheck (not one file) and show the summary lines.
+10. **Before reporting:** self-review your diff against rules 1–9 and list any rule you touched and how you satisfied it.
