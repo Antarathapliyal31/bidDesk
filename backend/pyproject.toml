@@ -52,6 +52,15 @@ ignore = ["E501"]  # line-length is enforced by `ruff format`, not by lint
 # Seed display names use the unicode × multiplication sign on purpose
 # (lumber dimensions, sheet sizes); RUF001/RUF003 would flag them.
 "app/catalog/seed.py" = ["RUF001", "RUF003"]
+# bid.py uses × and ≠ in docstrings / error messages / comments for
+# arithmetic identities (extended_cents = sale_qty × unit_price_cents);
+# RUF001/RUF002/RUF003 would flag those as typos.
+"app/contracts/bid.py" = ["RUF001", "RUF002", "RUF003"]
+# common.py uses ⇄ in docstring; same justification.
+"app/contracts/common.py" = ["RUF002"]
+# BidLine test docstrings mirror the invariant text (× in math
+# identities); same justification.
+"tests/contracts/test_bid_line_invariants.py" = ["RUF001", "RUF002", "RUF003"]
 # Sample content uses the unicode × multiplication sign too (lumber
 # dimensions in the mock RFPs); same justification.
 "../samples/make_samples.py" = ["RUF001", "RUF003"]

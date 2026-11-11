@@ -376,6 +376,58 @@ patches via events, so the heavy GET is only on page load. Also:
 SPEC §13 and `docs/API_CONTRACT.md` now overlap; the contract file
 is explicitly temporary and marked for deletion at Phase 5 merge.
 
+## 16. Conflicts require verified quotes on both sides — 2026-11-11
+Decision: `ConflictView.side_a.source.verified` AND
+`side_b.source.verified` must both be True — i.e. both halves have
+a text-matched quote (SourceRef's own validator already forbids
+`verified=True` when `read_via != "text"`). Contradictions where at
+least one side was read via vision don't become ConflictViews; they
+land in `bid.contractor_questions` with
+`basis.kind="flagged_line"` and the item id as `ref_id`.
+Because: A ConflictView is a strong claim that two statements in the
+document disagree. If one side is an OCR/vision read with no byte
+match, the "disagreement" might be a reading error rather than a
+real conflict. Forcing both sides through the text-verified gate
+keeps the conflict queue honest and routes the uncertain cases to
+estimator review instead of silently promoting them. The two-track
+rule also makes the UI copy obvious: ConflictView = "the document
+says both X and Y", contractor_question = "the document might say
+Y — please check".
+Alternatives considered: Allow mixed-verification conflicts and
+badge them (UI complexity, still leaks vision uncertainty into the
+`conflicts` list); drop conflicts entirely in favor of
+contractor_questions (loses the structured side_a/side_b/explanation
+shape the UI renders differently from a free-text question).
+Trade-off / known downside: A real conflict that happens to be
+spotted on a vision-read page becomes a question instead of a
+conflict. The estimator still sees it — the difference is in which
+list it appears in and the UI copy around it. Encoded in
+`contracts/bid.py:ConflictView._both_sides_verified`.
+
+## 17. Unverifiable item quotes are KEPT with a flag — 2026-11-11
+Decision: An item whose source quote can't be text-verified is kept
+in the bid with `source.verified=false` + note `quote_not_found` +
+review reason `unverified` (flag open). The estimator sees it and
+can confirm or edit. **Only** requirements and conflicts that would
+rest on such a quote go to `rejected_claims` — per SPEC §6.4, those
+have to be trustworthy by construction.
+Because: Dropping an unverifiable item would silently remove line
+items the customer asked for; dropping requirements/conflicts that
+depend on unverifiable text keeps the agent from making load-bearing
+claims out of unreliable reads. Two tracks, one rule: the LINE
+survives but is flagged; the strong CLAIMS don't survive. Encoded in
+`contracts/items.py:ItemView._invariants` (quote_not_found ⇒
+source.verified=False) and `contracts/bid.py:ConflictView` (both
+sides verified).
+Alternatives considered: Drop unverifiable items entirely (quiet
+data loss — exactly the failure mode SPEC §6.4 forbids); keep items
+AND requirements/conflicts (model could defend prices on quotes
+that don't exist; estimator can't easily tell).
+Trade-off / known downside: An unverifiable item sits in the bid as
+an open-flag line that the estimator must resolve. UI copy needs to
+explain why, so the estimator doesn't treat the flag as "something
+the agent broke". Encoded alongside DECISIONS #16's conflict rule.
+
 ---
 
 ## Frontend entries (F1–F5)
