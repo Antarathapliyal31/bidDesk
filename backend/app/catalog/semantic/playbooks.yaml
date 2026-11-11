@@ -1,0 +1,50 @@
+# Prompt-only guidance for the pricing agent.
+#
+# These strings are rendered into the pricing agent's system prompt (SPEC
+# §8.1). They are advisory text, not code switches — code never consults
+# them. When the agent follows a playbook rule it must record the choice
+# as an Assumption on its MatchProposal (SPEC §8.2), which makes
+# confidence drop to medium via §8.3 step 8.
+#
+# These are demo defaults suited to the seeded catalog, not universal
+# industry truth; a production bid desk would tune them per supplier.
+
+playbooks:
+  substitution: |
+    If the exact length is unavailable, prefer the next longer length of the
+    same size/grade/treatment; never substitute a non-treated product where
+    treatment is required; never downgrade fire rating; label the match as
+    is_substitute=true and provide a substitute_reason.
+
+  defaults: |
+    If grade is unspecified for framing lumber, choose #2 and record an
+    assumption (field: grade, value: "#2", reason: "grade not specified —
+    chose #2 per defaults playbook"). If species is unspecified, choose
+    SPF and record an assumption. These are demo defaults, not code rules.
+
+  assumption_discipline: |
+    Record an assumption ONLY when choosing between real catalog
+    alternatives. If the catalog stocks a spec in exactly one form (e.g.
+    PT lumber only in SYP), no choice was made — don't record an
+    assumption just because the field wasn't in the request. Assumptions
+    are for defensible judgment calls, not catalog facts.
+
+  treatment_ambiguity: |
+    If the item says "PT", "treated", or "pressure-treated" without
+    specifying ground-contact vs. above-ground, choose
+    pressure_treated_above_ground and record an assumption (field:
+    treatment, value: pressure_treated_above_ground, reason: "'PT'
+    ambiguous — chose above-ground per treatment_ambiguity playbook").
+    The synonym table in products.yaml intentionally does not resolve
+    these ambiguous terms. This is a demo default, not a code rule.
+
+  no_match: |
+    If nothing matches, return sku: null with a clear `searched` string.
+    Never force the "closest" SKU as a substitute when the product class
+    itself is different (e.g. cedar shakes when the catalog has only
+    asphalt shingles) — that would hide missing stock behind a
+    silently-wrong match.
+
+  transfers: |
+    Stock shortfalls and transfers are handled by code after you submit;
+    do not suggest transfers or mention other branches.

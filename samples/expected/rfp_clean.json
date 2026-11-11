@@ -1,0 +1,42 @@
+{
+  "pdf": "rfp_clean.pdf",
+  "page_count": 3,
+  "page_routes": {
+    "1": "text",
+    "2": "text",
+    "3": "text"
+  },
+  "must_not_include": [
+    "Maple Avenue Renovation",
+    "Page 1 of 3",
+    "Page 2 of 3",
+    "Page 3 of 3"
+  ],
+  "items": [
+    {"line_no": 1,  "description": "2x4 x 8' SPF #2",   "quantity_text": "50",   "unit_raw": "pcs",    "source_page": 1, "quote": "1. 2x4 x 8' SPF #2 ................. 50 pcs",           "expected_sku": "LUM-2X4-8-SPF-2"},
+    {"line_no": 2,  "description": "2x6 x 16' SPF #2",  "quantity_text": "30",   "unit_raw": "pcs",    "source_page": 1, "quote": "2. 2x6 x 16' SPF #2 ................ 30 pcs",           "expected_sku": "LUM-2X6-16-SPF-2"},
+    {"line_no": 3,  "description": "2x8 x 12' SPF #2",  "quantity_text": "20",   "unit_raw": "pcs",    "source_page": 1, "quote": "3. 2x8 x 12' SPF #2 ................ 20 pcs",           "expected_sku": "LUM-2X8-12-SPF-2"},
+    {"line_no": 4,  "description": "4x4 x 8' SPF #2",   "quantity_text": "8",    "unit_raw": "pcs",    "source_page": 1, "quote": "4. 4x4 x 8' SPF #2 ................. 8 pcs",            "expected_sku": "LUM-4X4-8-SPF-2"},
+    {"line_no": 5,  "description": "1/2 in OSB sheathing", "quantity_text": "1920", "unit_raw": "sq ft", "source_page": 2, "quote": "5. 1/2 in OSB sheathing ............ 1920 sq ft",       "expected_sku": "SHE-OSB-1_2-48X96"},
+    {"line_no": 6,  "description": "5/8 in Type X drywall", "quantity_text": "2400", "unit_raw": "sq ft", "source_page": 2, "quote": "6. 5/8 in Type X drywall ........... 2400 sq ft",       "expected_sku": "DRY-5_8-48X96-TYPEX"},
+    {"line_no": 7,  "description": "R-19 insulation",    "quantity_text": "1200", "unit_raw": "sq ft", "source_page": 2, "quote": "7. R-19 insulation ................. 1200 sq ft",       "expected_sku": "INS-R19-BAG"},
+    {"line_no": 8,  "description": "Asphalt shingles",   "quantity_text": "10",   "unit_raw": "SQ",    "source_page": 2, "quote": "8. Asphalt shingles ................ 10 SQ",             "expected_sku": "ROOF-SHINGLE-BDL"},
+    {"line_no": 9,  "description": "House wrap",         "quantity_text": "1",    "unit_raw": "roll",  "source_page": 2, "quote": "9. House wrap ...................... 1 roll",           "expected_sku": "WRAP-9X111-ROLL"},
+    {"line_no": 10, "description": "Joist hangers 2x8",  "quantity_text": "40",   "unit_raw": "ea",    "source_page": 3, "quote": "10. Joist hangers 2x8 .............. 40 ea",             "expected_sku": "CON-JHANG-2X8"},
+    {"line_no": 11, "description": "Common nails 8d",    "quantity_text": "2",    "unit_raw": "boxes", "source_page": 3, "quote": "11. Common nails 8d ................ 2 boxes",          "expected_sku": "FAST-NAIL-COMMON-8D-BOX"},
+    {"line_no": 12, "description": "Drywall screws 1-1/4 in", "quantity_text": "2", "unit_raw": "boxes", "source_page": 3, "quote": "12. Drywall screws 1-1/4 in ........ 2 boxes",   "expected_sku": "FAST-SCR-DRYWALL-1_25-BOX"},
+    {"line_no": 13, "description": "Deck screws 3 in",   "quantity_text": "3",    "unit_raw": "boxes", "source_page": 3, "quote": "13. Deck screws 3 in ............... 3 boxes",          "expected_sku": "FAST-SCR-DECK-3IN-BOX"},
+    {"line_no": 14, "description": "Finish nails 6d",    "quantity_text": "1",    "unit_raw": "box",   "source_page": 3, "quote": "14. Finish nails 6d ................ 1 box",             "expected_sku": "FAST-NAIL-FIN-6D-BOX"}
+  ],
+  "exclusions": [
+    {"description": "Labor not included.", "source_page": 3, "quote": "EXCLUSIONS: Labor not included."}
+  ],
+  "labor": [],
+  "conflicts": [],
+  "quote_verifiable": true,
+  "expected_requirement_rule_ids": [],
+  "expected_question_rule_ids": [
+    "underlayment_missing_for_shingles",
+    "roofing_type_missing"
+  ]
+}

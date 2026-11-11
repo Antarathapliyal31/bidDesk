@@ -1,0 +1,53 @@
+# Dimension-based unit conversions.
+#
+# Each dimension declares its base unit, the unit factors that normalize
+# other units into the base, and the sale units it can produce. Each sale
+# unit names a function in app/catalog/units.py (registered in
+# UNIT_CONVERSIONS) and the product fields that function needs.
+#
+# Code (never the agent) selects a dimension by matching the pair
+#   (item.unit, product.sale_unit)
+# against each dimension's `units` and `sale_units` tables, then checking
+# that every name in that sale unit's `uses_fields` is non-null on the
+# product row. Category is NOT part of the match — a conversion applies
+# whenever the product row carries the field it needs.
+#
+# `rounding` must be the literal string "ceil" for every dimension; the
+# semantic-layer loader fails startup if any other value appears (units.py
+# always ceils the final quotient — the knob exists only as documentation,
+# not as behavior). All math runs in Decimal; only the final quotient is
+# quantized to 6 dp before ceil.
+
+dimensions:
+  length:
+    base_unit: LF
+    units:
+      LF: 1
+    sale_units:
+      EA:
+        function: length_to_pieces
+        uses_fields: [length_ft]
+    rounding: ceil
+
+  area:
+    base_unit: SF
+    units:
+      SF: 1
+      SQ: 100              # 1 SQ = 100 SF
+    sale_units:
+      SHT:  {function: area_to_coverage_units, uses_fields: [coverage_sqft]}
+      BDL:  {function: squares_to_bundles,     uses_fields: [pack_qty]}       # shingles: bundles-per-square, not SF-per-bundle
+      BAG:  {function: area_to_coverage_units, uses_fields: [coverage_sqft]}
+      ROLL: {function: area_to_coverage_units, uses_fields: [coverage_sqft]}
+    rounding: ceil
+
+  board_measure:
+    base_unit: BF
+    units:
+      BF: 1
+      MBF: 1000            # 1 MBF = 1000 BF
+    sale_units:
+      EA:
+        function: board_feet_to_pieces
+        uses_fields: [nominal_size, length_ft]
+    rounding: ceil

@@ -1,0 +1,92 @@
+# Few-shot examples for the pricing agent only.
+#
+# These examples OVERRIDE playbook rules in prompt priority, so they must
+# demonstrate the playbook behavior they are supposed to teach:
+#   - ambiguity → chosen value + assumption
+#   - defaults  → chosen value + assumption
+#   - substitution → is_substitute=true + substitute_reason
+#   - no match → sku: null (never force the closest)
+#
+# Each entry shows the agent's `query_catalog` input and the expected
+# `submit_matches` entry side by side. The SKUs here must exist in the
+# seeded catalog.db — a boundary test (Phase 1 step 4) asserts that.
+#
+# `include_stock_for_branch` is NOT a field on CatalogQuery (SPEC §8.2):
+# the query builder always joins stock for the run's branch, same as it
+# always appends active = 1.
+
+examples:
+
+  # 1. Ambiguous PT: treatment_ambiguity assumption only.
+  #    Species is NOT an assumption — the catalog stocks PT in SYP only
+  #    (assumption_discipline playbook: catalog facts aren't choices).
+  - request: "2x6x16 PT, 40 pcs"
+    query:
+      entity: products
+      filters:
+        nominal_size: "2x6"
+        length_ft: 16
+        treatment: pressure_treated_above_ground
+    match:
+      sku: "LUM-2X6-16-SYP-2-PTAG"
+      is_substitute: false
+      assumptions:
+        - field: treatment
+          value: pressure_treated_above_ground
+          reason: "'PT' ambiguous — chose above-ground per treatment_ambiguity playbook"
+      searched: "2x6 16ft pressure-treated"
+
+  # 2. Missing grade + species: defaults playbook fills them in.
+  - request: "2x4x8, 50 pcs"
+    query:
+      entity: products
+      filters:
+        nominal_size: "2x4"
+        length_ft: 8
+        grade: "#2"
+        species: SPF
+    match:
+      sku: "LUM-2X4-8-SPF-2"
+      is_substitute: false
+      assumptions:
+        - field: grade
+          value: "#2"
+          reason: "grade not specified — chose #2 per defaults playbook"
+        - field: species
+          value: SPF
+          reason: "species not specified — chose SPF per defaults playbook"
+      searched: "2x4 8ft framing"
+
+  # 3. Substitute: 17ft isn't stocked; next longer available is 18ft.
+  - request: "2x10x17, 20 pcs"
+    query:
+      entity: products
+      filters:
+        nominal_size: "2x10"
+        length_ft: 18
+        grade: "#2"
+        species: SPF
+    match:
+      sku: "LUM-2X10-18-SPF-2"
+      is_substitute: true
+      substitute_reason: "17 ft not stocked; next longer available is 18 ft per substitution playbook"
+      assumptions:
+        - field: grade
+          value: "#2"
+          reason: "grade not specified — chose #2 per defaults playbook"
+        - field: species
+          value: SPF
+          reason: "species not specified — chose SPF per defaults playbook"
+      searched: "2x10 17ft (18ft substitute)"
+
+  # 4. No match: cedar shakes are not in the catalog. Never force the closest.
+  - request: "cedar shakes, 10 SQ"
+    query:
+      entity: products
+      filters:
+        category: roofing
+      text_search: "cedar"
+    match:
+      sku: null
+      is_substitute: false
+      searched: "cedar roofing shakes — no catalog SKU"

@@ -1,0 +1,16 @@
+# Code-only named queries. NOT exposed as an agent tool (SPEC §4.1, §8.2).
+#
+# Each entry declares a query's parameter signature and a sql_ref — the
+# key under which query_builder.py holds the pre-written SQL. Today the
+# only caller is agents/pricing/transfers.py, which runs
+# stock_all_branches on each shortfall line to produce transfer options.
+# The pricing agent never invokes these.
+
+named_queries:
+  stock_all_branches:
+    params: [sku]
+    sql_ref: stock_all_branches
+    description: >
+      Returns on_hand, next_receipt_date, next_receipt_qty, branch name
+      and city for every branch that stocks `sku`. Called by transfers.py
+      only when a priced line has shortfall > 0.

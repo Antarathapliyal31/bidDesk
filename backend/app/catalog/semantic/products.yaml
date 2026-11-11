@@ -1,0 +1,217 @@
+# The `products` entity in the catalog semantic layer.
+# Every column in catalog.db's `products` table is declared here (SPEC §8.1).
+# The loader cross-checks this list against PRAGMA table_info at startup.
+#
+# `description` + `synonyms` feed the pricing agent's prompt context and the
+# orchestrator's add_requirements validator. Synonym keys are stored in
+# canonical form (post-canonicalize: lowercase, periods stripped,
+# hyphens/en/em dashes → space, NFKC-folded, whitespace collapsed).
+#
+# Ambiguous synonyms (e.g. "PT" between ground-contact and above-ground
+# treatment) are NOT listed here; they are resolved by prompt-level rules in
+# playbooks.yaml. Code requirements (which dwellings need what rating) live
+# only in gap_rules.yaml with (verify) markers.
+
+table: products
+key: sku
+description: Sellable catalog items with price per sale unit.
+
+fields:
+  sku:
+    type: text
+
+  category:
+    type: enum
+    values: [dimensional_lumber, sheathing, drywall, insulation, roofing, fasteners, connectors, housewrap, trim]
+    filterable: true
+    matchable: true
+    description: "Product category. Determines which conversion dimension and sanity range applies."
+
+  nominal_size:
+    type: enum
+    values: ["1x4", "1x6", "1x8", "2x4", "2x6", "2x8", "2x10", "2x12", "4x4", "6x6"]
+    filterable: true
+    matchable: true
+    description: >
+      Nominal dimension in inches, e.g. '2x6' or '1x4'. Trim typically uses
+      1x4/1x6/1x8; framing uses 2x4 through 2x12 and 4x4/6x6.
+
+  length_ft:
+    type: int
+    values: [8, 10, 12, 14, 16, 18, 20]
+    filterable: true
+    matchable: true
+    description: "Lumber length in feet."
+
+  thickness_in:
+    type: enum
+    values: ["3/8", "7/16", "1/2", "5/8", "23/32", "3/4"]
+    filterable: true
+    matchable: true
+    description: "Sheet-goods / drywall thickness in inches, written as a fraction."
+    synonyms:
+      "3/8 in": "3/8"
+      "3/8 inch": "3/8"
+      'three eighths': "3/8"
+      '3/8"': "3/8"
+      "7/16 in": "7/16"
+      "7/16 inch": "7/16"
+      '7/16"': "7/16"
+      "1/2 in": "1/2"
+      "1/2 inch": "1/2"
+      "half inch": "1/2"
+      '1/2"': "1/2"
+      "5/8 in": "5/8"
+      "5/8 inch": "5/8"
+      "five eighths": "5/8"
+      '5/8"': "5/8"
+      "23/32 in": "23/32"
+      "23/32 inch": "23/32"
+      '23/32"': "23/32"
+      "3/4 in": "3/4"
+      "3/4 inch": "3/4"
+      "three quarters": "3/4"
+      '3/4"': "3/4"
+
+  width_in:
+    type: int
+    filterable: true
+    description: "Nominal width in inches (sheet goods)."
+
+  height_in:
+    type: int
+    filterable: true
+    description: "Nominal height in inches (sheet goods)."
+
+  grade:
+    type: enum
+    values: ["#1", "#2", "Stud", "Select"]
+    filterable: true
+    matchable: true
+    description: >
+      Lumber grade. '#2' is standard framing; 'Stud' is pre-cut and
+      precision-end-trimmed; 'Select' is cleaner-face.
+    synonyms:
+      "no 1": "#1"
+      "no1": "#1"           # canonicalize("No.1") drops the period with no inserted space
+      "no 2": "#2"
+      "no2": "#2"           # canonicalize("No.2") → "no2"
+      "stud grade": "Stud"
+      "select structural": "Select"
+
+  species:
+    type: enum
+    values: [SPF, SYP, DF]
+    filterable: true
+    matchable: true
+    description: >
+      Wood species. SPF = Spruce-Pine-Fir (standard framing).
+      SYP = Southern Yellow Pine (stronger; common when pressure-treated).
+      DF = Douglas Fir (strongest; often structural / engineered uses).
+    synonyms:
+      "spruce pine fir": SPF
+      "southern yellow pine": SYP
+      "southern pine": SYP
+      "doug fir": DF
+      "douglas fir": DF
+
+  treatment:
+    type: enum
+    values: [none, pressure_treated_ground_contact, pressure_treated_above_ground, fire_retardant]
+    filterable: true
+    matchable: true
+    description: >
+      Chemical treatment. 'pressure_treated_ground_contact' = rated for
+      contact with soil. 'pressure_treated_above_ground' = rated for exposed
+      use not in contact with soil. 'fire_retardant' = chemically treated for
+      fire resistance.
+    synonyms:
+      frt: fire_retardant
+      "fire retardant": fire_retardant
+      "ground contact": pressure_treated_ground_contact
+      "above ground": pressure_treated_above_ground
+      untreated: none
+      # "PT", "treated", "pressure treated" intentionally absent — ambiguous
+      # between ground-contact and above-ground. See playbooks.treatment_ambiguity.
+
+  fire_rating:
+    type: enum
+    values: [none, type_x]
+    filterable: true
+    matchable: true
+    description: "'type_x' = fire-rated gypsum board, typically 5/8 in."
+    synonyms:
+      "type x": type_x
+      "fire rated": type_x
+
+  moisture_resistant:
+    type: bool
+    filterable: true
+    matchable: true
+    description: >
+      Moisture-resistant drywall ('MR' or 'green board'). Common in bathrooms,
+      laundry rooms, and other wet areas.
+    synonyms:
+      mr: true
+      "green board": true
+      greenboard: true
+      "moisture resistant": true
+      "water resistant": true
+
+  r_value:
+    type: int
+    filterable: true
+    matchable: true
+    description: "Insulation thermal resistance (R-value). Higher = better insulator."
+
+  sale_unit:
+    type: enum
+    values: [EA, SHT, BDL, BOX, ROLL, BAG]
+    returnable: true
+    description: "The unit the product is sold in. Drives which conversion dimension applies."
+
+  pack_qty:
+    type: int
+    returnable: true
+    description: >
+      Pack-size integer, overloaded by category: for roofing BDL it is
+      bundles per square (used by squares_to_bundles); for fasteners BOX it
+      is pieces per box (not currently used by any dimension). See
+      docs/DECISIONS.md if a future EA→BOX rule splits this field.
+
+  coverage_sqft:
+    type: int
+    returnable: true
+    description: >
+      Square feet covered by one sale unit. Populated for every SHT, BAG,
+      and ROLL product (seed-side invariant). Used by area_to_coverage_units.
+
+  unit_price_cents:
+    type: int
+    returnable: true
+    description: "Price per sale unit in integer cents (SPEC §2: money is always integer cents)."
+
+  price_updated_at:
+    type: text
+    returnable: true
+    description: "ISO-8601 timestamp of the last price update."
+
+  active:
+    type: bool
+    returnable: true
+    description: >
+      Whether the SKU is currently sellable. Never a filter — the query
+      builder always appends `active = 1` to every products query (SPEC §8.2).
+
+  name:
+    type: text
+    searchable: true
+    description: "Short product name used for display."
+
+  description:
+    type: text
+    searchable: true
+    description: "Free-form product description used for keyword search."
+
+joins:
+  products_stock: {from: sku, to: stock.sku, type: left}

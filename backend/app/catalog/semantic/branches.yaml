@@ -1,0 +1,42 @@
+# The `branches` entity in the catalog semantic layer.
+# Physical branches where stock is held and taxes are computed.
+# Every column in catalog.db's `branches` table is declared here (SPEC §8.1).
+#
+# agent_visible: false — the pricing agent's prompt context omits this
+# entity entirely. Branches are code-only: the estimator chooses one per
+# run, the code tags the run with that branch_id, and the query builder
+# injects it on every products-with-stock query.
+
+table: branches
+key: id
+agent_visible: false
+description: Physical branches where stock is held and taxes are computed.
+
+fields:
+  id:
+    type: text
+    description: >
+      Chosen by the estimator per run; stored on the run by code;
+      referenced by stock.branch_id. No agent ever sets it.
+
+  name:
+    type: text
+    returnable: true
+    description: "Human-readable branch name."
+
+  city:
+    type: text
+    returnable: true
+
+  state:
+    type: text
+    returnable: true
+
+  tax_rate_ppm:
+    type: int
+    returnable: true
+    description: >
+      Local tax rate in parts per million (ppm). Integer units so fractional
+      basis points fit exactly — e.g. NJ 6.625% = 66250 ppm. bid/totals.py:
+      `tax_cents = subtotal_cents * tax_rate_ppm // 1_000_000`
+      ($1,000.00 * 66250 / 1e6 = $66.25).

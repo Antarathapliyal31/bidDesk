@@ -1,0 +1,27 @@
+# Per-(category, sale_unit) guardrails for post-conversion sale_qty.
+#
+# Each category maps to a LIST of entries, each one keyed by a specific
+# sale_unit. agents/pricing/verify.py (SPEC §8.3 step 5) looks up the entry
+# where `unit == product.sale_unit`; if no entry matches, the check is
+# skipped — no flag, no error. If `sale_qty > max_qty`, note `sanity_range`
+# is appended to verify_notes_json and the line is flagged for review.
+# Values are never auto-changed. Confidence is NOT affected by sanity_range
+# (confidence = match certainty only, SPEC §8.3 step 8).
+#
+# The semantic-layer loader validates that every `unit` here is in the
+# sale_unit enum declared in products.yaml ([EA, SHT, BDL, BOX, ROLL, BAG]);
+# an unknown unit aborts startup.
+
+sanity_ranges:
+  drywall:
+    - {unit: SHT, max_qty: 2000}
+  dimensional_lumber:
+    - {unit: EA, max_qty: 20000}
+  sheathing:
+    - {unit: SHT, max_qty: 2000}
+  insulation:
+    - {unit: BAG,  max_qty: 500}
+    - {unit: ROLL, max_qty: 200}
+  roofing:
+    - {unit: BDL,  max_qty: 300}
+    - {unit: ROLL, max_qty: 60}      # underlayment rolls
