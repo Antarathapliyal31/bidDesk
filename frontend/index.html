@@ -3,7 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>BidDesk</title>
+    <script>
+      // FOUC guard — runs before React mounts. Mirrors
+      // src/app/theme.ts so the first paint is already themed and
+      // native controls (scrollbars, file-input, autofill) match.
+      (function () {
+        try {
+          var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var el = document.documentElement;
+          if (dark) el.classList.add("dark");
+          el.style.colorScheme = dark ? "dark" : "light";
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

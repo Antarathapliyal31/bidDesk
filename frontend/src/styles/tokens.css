@@ -1,2 +1,251 @@
-/* Tailwind v4 entry. Design tokens per SPEC §11.5 land in Phase 6. */
+/*
+ * BidDesk design tokens — SPEC §11.5. Reference: Linear.
+ * Tailwind v4 CSS-first config. One accent (indigo), zinc neutrals,
+ * semantic colors never used alone (always paired with icon/text).
+ *
+ * WCAG AA note: the bright green/amber are only safe for icons & dots.
+ * Text in those colors uses the `-text` variants (darker in light mode,
+ * lighter in dark mode). See DECISIONS.md.
+ *
+ * Every foreground/background pair declared below is checked at build
+ * time by tests/tokens-contrast.test.ts against WCAG AA (≥ 4.5:1).
+ */
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/inter";
+
+/*
+ * Dark mode is applied as a `.dark` class on <html>. The inline script
+ * in index.html sets it from prefers-color-scheme before React mounts
+ * (prevents FOUC); app/theme.ts keeps it in sync when the media query
+ * changes.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Raw palette, type scale, radii. Shadcn-shaped slots that resolve to
+ * these live in `@theme inline` below so `.dark` overrides reach
+ * Tailwind utilities like `bg-background` / `text-foreground`.
+ */
+@theme {
+  /* Typography */
+  --font-sans:
+    "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /* Scale — base 13/20 for dense UI */
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.375rem;
+  --text-lg: 1.125rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.375rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.75rem;
+  --text-2xl--line-height: 2.125rem;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  /* Radii */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem; /* default */
+  --radius-lg: 0.5rem;
+
+  /* Zinc scale */
+  --color-zinc-50: #fafafa;
+  --color-zinc-100: #f4f4f5;
+  --color-zinc-200: #e4e4e7;
+  --color-zinc-300: #d4d4d8;
+  --color-zinc-400: #a1a1aa;
+  --color-zinc-500: #71717a;
+  --color-zinc-600: #52525b;
+  --color-zinc-700: #3f3f46;
+  --color-zinc-800: #27272a;
+  --color-zinc-900: #18181b;
+  --color-zinc-950: #09090b;
+
+  /* Indigo accent — Linear-ish. indigo-600 is the only shade used as a
+   * solid background under white text, in BOTH modes (white-on-500
+   * fails AA ~4.2:1). */
+  --color-indigo-400: #818cf8;
+  --color-indigo-500: #6670e0;
+  --color-indigo-600: #5e6ad2;
+  --color-indigo-700: #4c57ba;
+
+  /* Semantic — bright shades for icons/dots only */
+  --color-run-blue: #2563eb;
+  --color-done-green: #16a34a;
+  --color-warn-amber: #d97706;
+  --color-fail-red: #dc2626;
+  --color-injected-violet: #7c3aed;
+  /* Foreground that rides on --color-injected-violet (demo-injected
+   * Run button). White on #7c3aed is ~5.7:1 — passes AA for normal
+   * text in both themes (the bg shade doesn't change on dark). */
+  --color-injected-violet-foreground: #ffffff;
+
+  /* Semantic text variants (WCAG AA normal text ≥ 4.5:1):
+   * light mode on --background uses -700 shades; dark mode remaps
+   * these to -400 shades in the `.dark` block. */
+  --color-done-green-text: #15803d;
+  --color-warn-amber-text: #b45309;
+  --color-fail-red-text: #b91c1c;
+  --color-run-blue-text: #1d4ed8;
+  --color-injected-violet-text: #6d28d9;
+}
+
+/*
+ * Shadcn-shaped slots. `@theme inline` tells Tailwind v4 to keep the
+ * references as `var(...)` so `.dark { --background: ... }` reaches
+ * utilities like `bg-background` / `text-muted-foreground` /
+ * `border-border`.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+@layer base {
+  :root {
+    --background: var(--color-zinc-50);
+    --foreground: var(--color-zinc-900);
+
+    --card: #ffffff;
+    --card-foreground: var(--color-zinc-900);
+    --popover: #ffffff;
+    --popover-foreground: var(--color-zinc-900);
+
+    --primary: var(--color-indigo-600);
+    --primary-foreground: #ffffff;
+
+    --secondary: var(--color-zinc-100);
+    --secondary-foreground: var(--color-zinc-900);
+
+    /* zinc-600 (not 500) on muted zinc-100 passes AA — see contrast
+     * test. Never place muted text on anything darker. */
+    --muted: var(--color-zinc-100);
+    --muted-foreground: var(--color-zinc-600);
+
+    --accent: var(--color-zinc-100);
+    --accent-foreground: var(--color-zinc-900);
+
+    --destructive: var(--color-fail-red);
+    --destructive-foreground: #ffffff;
+
+    --border: var(--color-zinc-200);
+    --input: var(--color-zinc-200);
+    --ring: var(--color-indigo-600);
+
+    --radius: 0.375rem;
+  }
+
+  .dark {
+    --background: var(--color-zinc-950);
+    --foreground: var(--color-zinc-50);
+
+    --card: var(--color-zinc-900);
+    --card-foreground: var(--color-zinc-50);
+    --popover: var(--color-zinc-900);
+    --popover-foreground: var(--color-zinc-50);
+
+    /* Keep indigo-600 for primary — indigo-500 under white text fails
+     * AA (~4.2:1). */
+    --primary: var(--color-indigo-600);
+    --primary-foreground: #ffffff;
+
+    --secondary: var(--color-zinc-800);
+    --secondary-foreground: var(--color-zinc-50);
+
+    /* zinc-400 on zinc-800 ≈ 5.8:1. */
+    --muted: var(--color-zinc-800);
+    --muted-foreground: var(--color-zinc-400);
+
+    --accent: var(--color-zinc-800);
+    --accent-foreground: var(--color-zinc-50);
+
+    /* Keep #dc2626 for destructive — #ef4444 under white text fails
+     * AA (~3.8:1). */
+    --destructive: var(--color-fail-red);
+    --destructive-foreground: #ffffff;
+
+    --border: var(--color-zinc-800);
+    --input: var(--color-zinc-800);
+    --ring: var(--color-indigo-500);
+
+    /* Semantic text variants — lighter shades on dark surfaces. */
+    --color-done-green-text: #4ade80;
+    --color-warn-amber-text: #fbbf24;
+    --color-fail-red-text: #f87171;
+    --color-run-blue-text: #60a5fa;
+    --color-injected-violet-text: #a78bfa;
+  }
+
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: var(--text-sm--line-height);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Visible focus rings everywhere — SPEC §11.5. No radius override:
+   * the ring follows the shape of the element it wraps. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

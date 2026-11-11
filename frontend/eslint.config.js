@@ -20,6 +20,42 @@ export default tseslint.config(
     rules: {
       ...reactHooks.configs.recommended.rules,
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
+      // Only `src/api/**` and `tests/**` may import `@/dev-fixtures/*`.
+      // Features consume typed hooks (`@/api/*`), never fixtures or
+      // `Fx*` types directly — so the Phase-5 merge swap to real
+      // fetch calls is a one-line change per hook, with no call-site
+      // touch. Covers alias (`@/dev-fixtures`) + any relative path.
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: [
+                "@/dev-fixtures",
+                "@/dev-fixtures/*",
+                "**/dev-fixtures",
+                "**/dev-fixtures/*",
+              ],
+              message:
+                "Dev fixtures may only be imported from src/api/** or tests/**. Features consume typed hooks from @/api. See src/dev-fixtures/README.md.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // NOTE: this override turns no-restricted-imports fully OFF for
+    // these paths. Any future import bans we add to the base config
+    // must also be re-declared here, or they will silently not apply
+    // under src/api/, src/dev-fixtures/ and tests/.
+    files: [
+      "src/api/**/*.{ts,tsx}",
+      "src/dev-fixtures/**/*.{ts,tsx}",
+      "tests/**/*.{ts,tsx}",
+    ],
+    rules: {
+      "no-restricted-imports": "off",
     },
   },
   {

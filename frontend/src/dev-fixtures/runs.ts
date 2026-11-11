@@ -1,0 +1,138 @@
+import type { FxRunSummary } from "./types";
+
+/**
+ * Deterministic fixture runs covering every §11.4 state:
+ *   - running
+ *   - completed + finalized (with diff)
+ *   - completed + unfinalized, bid_ready, with open flags
+ *   - partial
+ *   - failed
+ *   - interrupted
+ *   - no_materials
+ *   - a second completed + finalized (with a one-delete diff)
+ *
+ * Branch names match FIXTURE_BRANCHES (NJ / NY / PA). Project names
+ * are neutral so they don't read region-specific.
+ */
+export const FIXTURE_RUNS: FxRunSummary[] = [
+  {
+    id: "run_demo_a1",
+    status: "running",
+    outcome: null,
+    input_kind: "pdf",
+    input_name: "rfp_messy.pdf",
+    project_name: "Maple St. Duplex",
+    branch_name: "BidDesk North Jersey",
+    priced_lines: 0,
+    open_flags: 0,
+    total_cents: null,
+    created_at: "2026-11-10T13:02:11Z",
+    finalized_at: null,
+    diff: null,
+  },
+  {
+    id: "run_demo_b2",
+    status: "completed",
+    outcome: "bid_ready",
+    input_kind: "pdf",
+    input_name: "rfp_clean.pdf",
+    project_name: "Oak Ridge Addition",
+    branch_name: "BidDesk North Jersey",
+    priced_lines: 15,
+    open_flags: 0,
+    total_cents: 487_213,
+    created_at: "2026-11-09T19:41:03Z",
+    finalized_at: "2026-11-09T20:12:44Z",
+    diff: { changed: 2, added: 1, deleted: 0, accepted: 3 },
+  },
+  {
+    id: "run_demo_h8",
+    status: "completed",
+    outcome: "bid_ready",
+    input_kind: "pdf",
+    input_name: "rfp_messy.pdf",
+    project_name: "Riverside Office Buildout",
+    branch_name: "BidDesk North Jersey",
+    priced_lines: 18,
+    open_flags: 4,
+    total_cents: 624_980,
+    created_at: "2026-11-09T11:08:12Z",
+    finalized_at: null,
+    diff: null,
+  },
+  {
+    id: "run_demo_c3",
+    status: "partial",
+    outcome: "budget_exhausted",
+    input_kind: "pdf",
+    input_name: "rfp_messy.pdf",
+    project_name: "Northside Remodel",
+    branch_name: "BidDesk Long Island",
+    priced_lines: 22,
+    open_flags: 6,
+    total_cents: 981_450,
+    created_at: "2026-11-08T22:14:30Z",
+    finalized_at: null,
+    diff: null,
+  },
+  {
+    id: "run_demo_d4",
+    status: "failed",
+    outcome: "error",
+    input_kind: "pdf",
+    input_name: "corrupt.pdf",
+    project_name: null,
+    branch_name: "BidDesk Long Island",
+    priced_lines: 0,
+    open_flags: 0,
+    total_cents: null,
+    created_at: "2026-11-08T17:02:00Z",
+    finalized_at: null,
+    diff: null,
+  },
+  {
+    id: "run_demo_e5",
+    status: "interrupted",
+    outcome: null,
+    input_kind: "pdf",
+    input_name: "rfp_messy.pdf",
+    project_name: "Harbor View Carport",
+    branch_name: "BidDesk Lehigh Valley",
+    priced_lines: 11,
+    open_flags: 3,
+    total_cents: null,
+    created_at: "2026-11-07T15:48:22Z",
+    finalized_at: null,
+    diff: null,
+  },
+  {
+    id: "run_demo_f6",
+    status: "completed",
+    outcome: "no_materials",
+    input_kind: "text",
+    input_name: "Pasted list",
+    project_name: null,
+    branch_name: "BidDesk North Jersey",
+    priced_lines: 0,
+    open_flags: 0,
+    total_cents: null,
+    created_at: "2026-11-07T09:30:10Z",
+    finalized_at: null,
+    diff: null,
+  },
+  {
+    id: "run_demo_g7",
+    status: "completed",
+    outcome: "bid_ready",
+    input_kind: "text",
+    input_name: "list_paste.txt",
+    project_name: "Garage Shelving",
+    branch_name: "BidDesk Lehigh Valley",
+    priced_lines: 10,
+    open_flags: 0,
+    total_cents: 143_900,
+    created_at: "2026-11-06T18:11:51Z",
+    finalized_at: "2026-11-06T18:34:02Z",
+    diff: { changed: 0, added: 0, deleted: 1, accepted: 0 },
+  },
+];

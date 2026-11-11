@@ -1,8 +1,15 @@
+import { Providers } from "@/app/Providers";
+import { AppRoutes } from "@/app/router";
+
+/**
+ * App root. All providers (QueryClient, CommandMenu, Shortcuts,
+ * BrowserRouter, Toaster, theme-sync) live in Providers; routes live
+ * in AppRoutes. Keep this file small so the entry point stays obvious.
+ */
 export default function App() {
   return (
-    <main className="p-6">
-      <h1 className="text-lg font-semibold">BidDesk</h1>
-      <p className="text-sm text-zinc-500">Phase 0 scaffold.</p>
-    </main>
+    <Providers>
+      <AppRoutes />
+    </Providers>
   );
 }
