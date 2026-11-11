@@ -22,6 +22,13 @@ playbooks:
     chose #2 per defaults playbook"). If species is unspecified, choose
     SPF and record an assumption. These are demo defaults, not code rules.
 
+  assumption_discipline: |
+    Record an assumption ONLY when choosing between real catalog
+    alternatives. If the catalog stocks a spec in exactly one form (e.g.
+    PT lumber only in SYP), no choice was made — don't record an
+    assumption just because the field wasn't in the request. Assumptions
+    are for defensible judgment calls, not catalog facts.
+
   treatment_ambiguity: |
     If the item says "PT", "treated", or "pressure-treated" without
     specifying ground-contact vs. above-ground, choose

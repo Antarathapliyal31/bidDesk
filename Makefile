@@ -1,4 +1,4 @@
-.PHONY: setup seed samples dev dev-backend dev-frontend test test-backend test-frontend lint gen-api check-contract clean help
+.PHONY: setup seed samples dev dev-backend dev-frontend test test-backend test-frontend lint check gen-api check-contract clean help
 
 PYTHON ?= python3.11
 VENV := backend/.venv
@@ -12,7 +12,8 @@ help:
 	@echo "  samples         generate samples/*.pdf (Phase 1)"
 	@echo "  dev             run backend (:8000) and frontend (:5173) together"
 	@echo "  test            run backend pytest + frontend vitest"
-	@echo "  lint            ruff check + eslint"
+	@echo "  lint            ruff check + ruff format --check + eslint"
+	@echo "  check           lint + test (CI-equivalent sweep)"
 	@echo "  gen-api         regen frontend/openapi.json + src/api/schema.gen.ts (Phase 6)"
 	@echo "  check-contract  fail if generated contract files are stale (Phase 6)"
 	@echo "  clean           remove venv, node_modules, caches"
@@ -29,10 +30,10 @@ frontend/node_modules: frontend/package.json
 	cd frontend && npm install
 
 seed:
-	@echo "seed: not yet implemented (Phase 1)."
+	cd backend && ../$(VENV)/bin/python -m app.catalog.seed
 
 samples:
-	@echo "samples: not yet implemented (Phase 1)."
+	$(VENV)/bin/python samples/make_samples.py
 
 dev-backend:
 	cd backend && ../$(VENV)/bin/uvicorn app.main:app --reload --port 8000
@@ -55,6 +56,8 @@ test-frontend:
 lint:
 	cd backend && ../$(VENV)/bin/ruff check . && ../$(VENV)/bin/ruff format --check .
 	cd frontend && npm run lint
+
+check: lint test
 
 gen-api:
 	@echo "gen-api: not yet implemented (Phase 6)."

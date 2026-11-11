@@ -1,0 +1,27 @@
+{
+  "pdf": null,
+  "page_count": 1,
+  "page_routes": {"1": "text"},
+  "must_not_include": [],
+  "quote_verifiable": true,
+  "items": [
+    {"line_no": 1,  "description": "2x4x8 SPF #2",       "quantity_text": "50",   "unit_raw": "pcs",   "source_page": 1, "quote": "2x4x8 SPF #2 - 50 pcs",              "expected_sku": "LUM-2X4-8-SPF-2"},
+    {"line_no": 2,  "description": "2x6x16 SPF #2",      "quantity_text": "30",   "unit_raw": "pcs",   "source_page": 1, "quote": "2x6x16 SPF #2 - 30 pcs",             "expected_sku": "LUM-2X6-16-SPF-2"},
+    {"line_no": 3,  "description": "1/2 OSB sheathing",  "quantity_text": "1920", "unit_raw": "sq ft", "source_page": 1, "quote": "1/2 OSB sheathing - 1920 sq ft",     "expected_sku": "SHE-OSB-1_2-48X96"},
+    {"line_no": 4,  "description": "5/8 Type X drywall", "quantity_text": "2400", "unit_raw": "sqft",  "source_page": 1, "quote": "5/8 Type X drywall - 2400 sqft",     "expected_sku": "DRY-5_8-48X96-TYPEX"},
+    {"line_no": 5,  "description": "R-19 insulation",    "quantity_text": "1200", "unit_raw": "sf",    "source_page": 1, "quote": "R-19 insulation - 1200 sf",          "expected_sku": "INS-R19-BAG"},
+    {"line_no": 6,  "description": "Asphalt shingles",   "quantity_text": "10",   "unit_raw": "SQ",    "source_page": 1, "quote": "Asphalt shingles - 10 SQ",           "expected_sku": "ROOF-SHINGLE-BDL"},
+    {"line_no": 7,  "description": "House wrap",         "quantity_text": "1",    "unit_raw": "roll",  "source_page": 1, "quote": "House wrap - 1 roll",                "expected_sku": "WRAP-9X111-ROLL"},
+    {"line_no": 8,  "description": "Joist hangers 2x8",  "quantity_text": "40",   "unit_raw": "ea",    "source_page": 1, "quote": "Joist hangers 2x8 - 40 ea",          "expected_sku": "CON-JHANG-2X8"},
+    {"line_no": 9,  "description": "Common nails 8d",    "quantity_text": "2",    "unit_raw": "boxes", "source_page": 1, "quote": "Common nails 8d - 2 boxes",          "expected_sku": "FAST-NAIL-COMMON-8D-BOX"},
+    {"line_no": 10, "description": "Deck screws 3in",    "quantity_text": "3",    "unit_raw": "BOX",   "source_page": 1, "quote": "Deck screws 3in - 3 BOX",            "expected_sku": "FAST-SCR-DECK-3IN-BOX"}
+  ],
+  "exclusions": [],
+  "labor": [],
+  "conflicts": [],
+  "expected_requirement_rule_ids": [],
+  "expected_question_rule_ids": [
+    "underlayment_missing_for_shingles",
+    "roofing_type_missing"
+  ]
+}

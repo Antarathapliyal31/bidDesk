@@ -12,7 +12,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "anthropic>=0.39",
     "pdfplumber>=0.11",
-    "pypdfium2>=4.30",
+    "pypdfium2==4.30.0",  # pinned: rasterization output is deterministic for fixed (input, DPI, build)
     "pint>=0.24",
     "sse-starlette>=2.1",
     "pyyaml>=6.0",
@@ -49,6 +49,12 @@ ignore = ["E501"]  # line-length is enforced by `ruff format`, not by lint
 # and fullwidth letters; RUF001/RUF002/RUF003 would flag those as typos.
 "app/catalog/units.py" = ["RUF001", "RUF002", "RUF003"]
 "tests/catalog/test_units.py" = ["RUF001", "RUF002", "RUF003"]
+# Seed display names use the unicode × multiplication sign on purpose
+# (lumber dimensions, sheet sizes); RUF001/RUF003 would flag them.
+"app/catalog/seed.py" = ["RUF001", "RUF003"]
+# Sample content uses the unicode × multiplication sign too (lumber
+# dimensions in the mock RFPs); same justification.
+"../samples/make_samples.py" = ["RUF001", "RUF003"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

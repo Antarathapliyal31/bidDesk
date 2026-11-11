@@ -17,7 +17,9 @@
 
 examples:
 
-  # 1. Ambiguous PT: playbook chooses above-ground; assumption recorded.
+  # 1. Ambiguous PT: treatment_ambiguity assumption only.
+  #    Species is NOT an assumption — the catalog stocks PT in SYP only
+  #    (assumption_discipline playbook: catalog facts aren't choices).
   - request: "2x6x16 PT, 40 pcs"
     query:
       entity: products
@@ -26,7 +28,7 @@ examples:
         length_ft: 16
         treatment: pressure_treated_above_ground
     match:
-      sku: "LUM-2X6-16-SPF-2-PTAG"
+      sku: "LUM-2X6-16-SYP-2-PTAG"
       is_substitute: false
       assumptions:
         - field: treatment

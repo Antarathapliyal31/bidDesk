@@ -2,9 +2,10 @@
 
 Each failing case copies the real bundle to a tmp dir and mutates exactly
 one file, so the assertion isolates a single check. The happy-path fixture
-builds a minimal catalog.db matching SPEC §5.2 and seeds the SKUs that
-examples.yaml references, so the real bundle loads cleanly without the
-Phase 1 step 4 seeder.
+builds a catalog.db from the SHARED `app/catalog/schema.sql` (same file
+`seed.py` uses, so this file and the seed can't drift) and inserts the
+SKUs that examples.yaml references, so the real bundle loads cleanly
+without needing to run the full Phase 1 step 4 seeder.
 """
 
 from __future__ import annotations
@@ -19,53 +20,12 @@ import yaml
 from app.catalog.semantic_layer import SemanticLayerError, load_bundle
 
 _BUNDLE_DIR = Path(__file__).resolve().parents[2] / "app" / "catalog" / "semantic"
+_SCHEMA_SQL = (Path(__file__).resolve().parents[2] / "app" / "catalog" / "schema.sql").read_text(
+    encoding="utf-8"
+)
 
 
-_SCHEMA_SQL = """
-CREATE TABLE branches (
-  id TEXT PRIMARY KEY,
-  name TEXT,
-  city TEXT,
-  state TEXT,
-  tax_rate_ppm INTEGER NOT NULL
-);
-
-CREATE TABLE products (
-  sku TEXT PRIMARY KEY,
-  category TEXT NOT NULL,
-  nominal_size TEXT,
-  length_ft INTEGER,
-  thickness_in TEXT,
-  width_in INTEGER,
-  height_in INTEGER,
-  grade TEXT,
-  species TEXT,
-  treatment TEXT NOT NULL DEFAULT 'none',
-  fire_rating TEXT NOT NULL DEFAULT 'none',
-  moisture_resistant INTEGER NOT NULL DEFAULT 0,
-  r_value INTEGER,
-  sale_unit TEXT NOT NULL,
-  pack_qty INTEGER,
-  coverage_sqft INTEGER,
-  unit_price_cents INTEGER NOT NULL,
-  price_updated_at TEXT NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1,
-  name TEXT NOT NULL,
-  description TEXT NOT NULL
-);
-
-CREATE TABLE stock (
-  sku TEXT REFERENCES products(sku),
-  branch_id TEXT REFERENCES branches(id),
-  on_hand INTEGER NOT NULL,
-  next_receipt_date TEXT,
-  next_receipt_qty INTEGER,
-  PRIMARY KEY (sku, branch_id)
-);
-"""
-
-
-_EXAMPLE_SKUS = ("LUM-2X6-16-SPF-2-PTAG", "LUM-2X4-8-SPF-2", "LUM-2X10-18-SPF-2")
+_EXAMPLE_SKUS = ("LUM-2X6-16-SYP-2-PTAG", "LUM-2X4-8-SPF-2", "LUM-2X10-18-SPF-2")
 
 
 def _make_catalog_db(
@@ -206,7 +166,7 @@ class TestFileLevelFailures:
             tmp_path,
             {"products.yaml": lambda s: s.replace("type: text", "type: textX", 1)},
         )
-        with pytest.raises(SemanticLayerError, match=r"products\.yaml"):
+        with pytest.raises(SemanticLayerError, match=r"(?s)products\.yaml.*type"):
             load_bundle(broken, catalog_db)
 
 
@@ -357,6 +317,26 @@ class TestSynonymValidation:
             {"products.yaml": lambda s: s.replace('"type x": type_x', '"Type X": type_x', 1)},
         )
         with pytest.raises(SemanticLayerError, match=r"not canonical"):
+            load_bundle(broken, catalog_db)
+
+    def test_synonym_on_unconstrained_text_field_rejected(
+        self, tmp_path: Path, catalog_db: Path
+    ) -> None:
+        # products.yaml declares `name:` as a text field with no enumerated
+        # values. Attaching synonyms is meaningless (no canonical value to
+        # map to), so the loader must reject.
+        def mutate(s: str) -> str:
+            return s.replace(
+                "  name:\n    type: text\n    searchable: true\n"
+                '    description: "Short product name used for display."',
+                "  name:\n    type: text\n    searchable: true\n"
+                '    description: "Short product name used for display."\n'
+                '    synonyms:\n      "product name": something',
+                1,
+            )
+
+        broken = _clone_bundle(tmp_path, {"products.yaml": mutate})
+        with pytest.raises(SemanticLayerError, match=r"synonyms are only meaningful"):
             load_bundle(broken, catalog_db)
 
 

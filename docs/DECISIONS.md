@@ -112,3 +112,21 @@ hides the invariant from readers).
 Trade-off / known downside: If someone forgets to set the key before a
 real run, they'll see the failure one call in, not at startup — the
 error message is explicit about adding it to `.env`.
+
+## 7. PT framing seeded only in SYP (East Coast realism) — 2026-11-10
+Decision: Pressure-treated dimensional lumber is seeded exclusively in
+SYP (Southern Yellow Pine). SPF is seeded untreated only. The catalog
+has no SPF-PT rows.
+Because: Real LBM distributors on the East Coast stock PT lumber in SYP
+because SYP's open cell structure accepts the treatment chemistry; SPF
+is kiln-dried and generally untreated. A demo defending every
+non-obvious choice to an interviewer can't have SPF-PT on the shelf.
+Alternatives considered: Seed SPF-PT too — simplifies the species
+defaults playbook (always SPF) but misrepresents the industry.
+Trade-off / known downside: The ambiguous-PT example doesn't need a
+species assumption anymore (catalog has one option; no choice was
+made). This is codified by the new `assumption_discipline` playbook —
+assumptions are reserved for defensible judgment calls between real
+catalog alternatives, not for filling in fields the catalog doesn't
+offer alternatives for. See `backend/app/catalog/semantic/examples.yaml`
+example #1 and `playbooks.yaml.assumption_discipline`.

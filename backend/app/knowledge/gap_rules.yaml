@@ -1,0 +1,376 @@
+# Gap rules — trigger `requirement` assertions or `question` prompts
+# before pricing an item (SPEC §7.4). The loader + matcher ship in
+# app/knowledge/matcher.py; the orchestrator (Phase 3+) applies them via
+# the `check_gap_rules` tool.
+#
+# Rule anatomy
+# ------------
+#   id                 unique identifier
+#   title              short human label
+#   scope              "item" | "bid". `item` fires once per matching
+#                      item; `bid` fires at most once per bid.
+#   action             "requirement" | "question".
+#                        requirement → carries `requirement: {field, value|value_in}`
+#                        and tells code "this field MUST be set this way."
+#                        question → carries `question_template`.
+#   applies_to         - item scope: { category, triggered_when,
+#                                      context_keywords, context_all_of }
+#                      - bid scope:  { triggered_by_any,
+#                                      absent_match?: { category,
+#                                                       sale_unit?,
+#                                                       name_contains? } }
+#   missing_condition  one of {field, is_null} / {field, equals} /
+#                      {field, not_equals} / {field, not_in} /
+#                      {description}
+#   requirement        required when action=requirement; {field, value}
+#                      or {field, value_in: [...]}
+#   question_template  required when action=question
+#   code_ref           "IRC …(verify)" string with the literal `(verify)`
+#                      suffix OR null
+#   basis              required when code_ref is null; must contain
+#                      "common practice"
+#
+# Keyword matching (word-boundary, case-insensitive, trailing-"s" optional)
+# ------------------------------------------------------------------------
+#   context_keywords   list; ANY one match is enough (OR semantics).
+#   context_all_of     list of lists; each inner list is a GROUP. At least
+#                      one keyword in EACH group must match (AND of OR).
+#
+# Keywords are matched against `item.source_quote` + caller-provided
+# `context_text` (same sentence / section) — never the whole document.
+# Trailing-"s" is optional on every keyword, so "plate" matches both
+# "plate" and "plates"; word boundaries are strict, so "post" does not
+# match "postpone" or "composite" and "ridge" does not match "fridge".
+#
+# absent_match (bid scope)
+# ------------------------
+# { category, sale_unit?, name_contains? } says "the bid has NO item that
+# matches all of these at once." Underlayment uses {roofing, ROLL}:
+# silenced only by a roofing ROLL. Hurricane ties use
+# {connectors, name_contains: "hurricane"}: joist hangers (connectors
+# without "hurricane" in the name) do NOT silence the rule.
+# A rule WITHOUT absent_match fires whenever triggered_by_any matches —
+# PT-fastener compatibility fires on any PT lumber, regardless of
+# whether a fastener line is already in the bid.
+#
+# Item dict contract (SPEC §7.4 / Phase 3)
+# ---------------------------------------
+# Rules see items as plain dicts. The orchestrator populates them at
+# two different times:
+#   - ITEM-scope rules run after classify_items, so each item carries
+#     `category`, parsed attributes (nominal_size, length_ft,
+#     thickness_in, grade, species, treatment, fire_rating,
+#     moisture_resistant, r_value, …), and `source_quote`. `sale_unit`,
+#     `name`, and other post-pricing fields are NOT yet populated.
+#   - BID-scope missing-line rules (underlayment, housewrap, hurricane
+#     ties) run AFTER pricing on priced lines, because `absent_match`
+#     tests `sale_unit` and `name_contains` from the matched catalog
+#     product.
+#   - The PT-fastener bid rule only reads `category` + `treatment`, so
+#     it can fire either side of pricing.
+#
+# Evaluation order (SPEC §7.4 / Phase 3)
+# -------------------------------------
+# Pass 1: evaluate every item-scope `requirement` rule in file order.
+#         For each one that fires, record the requirement (unchanged —
+#         `value_in` stays as the full list) and apply it to an
+#         in-memory COPY of the item for subsequent evaluation. When the
+#         requirement is `value_in: [a, b]`, the first entry is used as
+#         a deterministic evaluation choice; the EMITTED requirement
+#         retains the full list, so the estimator / orchestrator can
+#         still decide.
+# Pass 2: evaluate item-scope `question` rules against the UPDATED item.
+# Effect: a requirement that sets `treatment` to PT (first in value_in)
+# makes the "above-ground vs ground-contact" variant question fire on
+# the same item in the same pass.
+#
+# Description-only missing_condition
+# ----------------------------------
+# When `missing_condition` has only `description` (no structured
+# operator), the rule is a candidate for orchestrator judgment in
+# Phase 3. The Phase 1 matcher treats these as "always satisfied once
+# applies_to has matched"; the orchestrator can refine later.
+#
+# Code-reference discipline (SPEC §7.4)
+# -------------------------------------
+# Never invent section numbers. Every `code_ref` either contains the
+# literal `(verify)` suffix OR is null with `basis` containing
+# "common practice".
+
+rules:
+
+  # ------------------------------------------------------------------
+  # Item-scope requirements (evaluated first)
+  # ------------------------------------------------------------------
+
+  - id: pt_sill_plates_on_concrete
+    title: "Pressure-treated sill/bottom plates on concrete"
+    scope: item
+    action: requirement
+    applies_to:
+      category: dimensional_lumber
+      context_all_of:
+        - [sill plate, bottom plate, plate]
+        - [concrete, slab, masonry, foundation]
+    missing_condition:
+      field: treatment
+      not_in: [pressure_treated_above_ground, pressure_treated_ground_contact]
+    requirement:
+      field: treatment
+      value_in: [pressure_treated_above_ground, pressure_treated_ground_contact]
+    code_ref: "IRC R317.1 (verify)"
+    basis: null
+
+  - id: pt_posts_in_ground
+    title: "Pressure-treated 4x4 posts in soil / in-ground"
+    scope: item
+    action: requirement
+    applies_to:
+      category: dimensional_lumber
+      triggered_when:
+        nominal_size: "4x4"
+      context_keywords: [in-ground, ground contact, soil, deck post, post]
+    missing_condition:
+      field: treatment
+      not_equals: pressure_treated_ground_contact
+    requirement:
+      field: treatment
+      value: pressure_treated_ground_contact
+    code_ref: "IRC R317.1.2 (verify)"
+    basis: null
+
+  - id: wet_area_drywall_mr
+    title: "Moisture-resistant drywall in wet areas"
+    scope: item
+    action: requirement
+    applies_to:
+      category: drywall
+      context_keywords: [bathroom, bath, shower, laundry, wet area, powder room]
+    missing_condition:
+      field: moisture_resistant
+      not_equals: 1
+    requirement:
+      field: moisture_resistant
+      value: 1
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: garage_ceiling_type_x
+    title: "Type X drywall at garage ceiling / dwelling separation"
+    scope: item
+    action: requirement
+    applies_to:
+      category: drywall
+      context_keywords: [garage, garage ceiling, garage wall, attached garage, between garage]
+    missing_condition:
+      field: fire_rating
+      not_in: [type_x]
+    requirement:
+      field: fire_rating
+      value: type_x
+    code_ref: "IRC R302.6 (verify)"
+    basis: null
+
+  - id: fire_rating_separation_walls
+    title: "Fire-rated drywall on dwelling-separation walls"
+    scope: item
+    action: requirement
+    applies_to:
+      category: drywall
+      context_keywords: [separation wall, common wall, demising wall, fire wall, unit separation]
+    missing_condition:
+      field: fire_rating
+      not_in: [type_x]
+    requirement:
+      field: fire_rating
+      value: type_x
+    code_ref: "IRC R302 (verify)"
+    basis: null
+
+  # ------------------------------------------------------------------
+  # Item-scope questions (evaluated against requirement-applied items)
+  # ------------------------------------------------------------------
+
+  - id: pt_variant_above_vs_ground_contact
+    title: "PT above-ground vs ground-contact rating"
+    scope: item
+    action: question
+    applies_to:
+      category: dimensional_lumber
+      triggered_when:
+        treatment: [pressure_treated_above_ground, pressure_treated_ground_contact]
+      context_all_of:
+        - [sill plate, bottom plate, plate]
+        - [concrete, slab, masonry, foundation]
+    missing_condition:
+      description: "PT required but above-ground vs ground-contact rating not confirmed."
+    question_template: >
+      This pressure-treated lumber is on concrete/slab/masonry. Should it
+      be ground-contact rated (direct soil/slab) or above-ground rated
+      (not in direct contact)?
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: drywall_type_missing
+    title: "Drywall type not specified"
+    scope: item
+    action: question
+    applies_to:
+      category: drywall
+      triggered_when:
+        fire_rating: none
+        moisture_resistant: 0
+    missing_condition:
+      description: "Drywall quoted by thickness only; no regular / MR / Type X distinction."
+    question_template: >
+      The drywall line gives a thickness but no type. Should it be
+      regular, moisture-resistant, or Type X?
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: sheathing_thickness_missing
+    title: "Sheathing thickness not specified"
+    scope: item
+    action: question
+    applies_to:
+      category: sheathing
+    missing_condition:
+      field: thickness_in
+      is_null: true
+    question_template: >
+      The sheathing line doesn't specify a thickness. Common choices are
+      7/16, 1/2, or 23/32 OSB and 1/2 or 3/4 CDX plywood — which applies?
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: insulation_r_value_missing
+    title: "Insulation R-value not specified"
+    scope: item
+    action: question
+    applies_to:
+      category: insulation
+    missing_condition:
+      field: r_value
+      is_null: true
+    question_template: >
+      The insulation line doesn't specify an R-value. Which is needed —
+      R-13 (2x4 walls), R-19/R-21 (2x6 walls), R-30 (ceilings)?
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: roofing_type_missing
+    title: "Roofing product type not specified"
+    scope: item
+    action: question
+    applies_to:
+      category: roofing
+      triggered_when:
+        sale_unit: BDL
+    missing_condition:
+      description: "Shingle bundles given without 3-tab vs architectural distinction."
+    question_template: >
+      The scope lists roofing bundles but doesn't name the product. Is
+      this 3-tab asphalt or architectural / dimensional?
+    code_ref: null
+    basis: "common practice (verify)"
+
+  # ------------------------------------------------------------------
+  # Bid-scope questions (fire at most once per bid)
+  # ------------------------------------------------------------------
+
+  - id: deck_ledger_flashing
+    title: "Deck ledger flashing"
+    scope: bid
+    action: question
+    applies_to:
+      # No absent_match — the catalog has no "flashing" category; the
+      # question fires once per bid when ledger context appears on any
+      # lumber item, so three ledger lines don't produce three copies
+      # of the same question.
+      triggered_by_any:
+        - category: dimensional_lumber
+          context_keywords: [deck ledger, ledger board, ledger attached]
+    missing_condition:
+      description: "Deck ledger in scope; flashing / z-metal inclusion must be confirmed."
+    question_template: >
+      The scope mentions a deck ledger. Is flashing (z-metal) at the
+      ledger-to-wall interface included, or should it be added?
+    code_ref: "IRC R507 (verify)"
+    basis: null
+
+  - id: pt_fasteners_for_pt_bid
+    title: "Fastener compatibility for pressure-treated lumber"
+    scope: bid
+    action: question
+    applies_to:
+      # No absent_match — fires whenever PT lumber is in the bid, even
+      # if a fastener line is already present (finish may be wrong).
+      triggered_by_any:
+        - category: dimensional_lumber
+          triggered_when:
+            treatment: [pressure_treated_above_ground, pressure_treated_ground_contact]
+    missing_condition:
+      description: "Bid includes PT lumber; HDG/stainless finish must be confirmed."
+    question_template: >
+      The bid includes pressure-treated lumber. Which fastener finish
+      should be used — hot-dipped galvanized (HDG) or stainless? Plain
+      steel corrodes in contact with modern PT chemistry.
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: underlayment_missing_for_shingles
+    title: "Shingles in bid but no underlayment"
+    scope: bid
+    action: question
+    applies_to:
+      absent_match:
+        category: roofing
+        sale_unit: ROLL
+      triggered_by_any:
+        - category: roofing
+          triggered_when:
+            sale_unit: BDL
+    missing_condition:
+      description: "Shingle bundles present but no synthetic/felt underlayment roll."
+    question_template: >
+      Shingles are in the bid but no underlayment is. Should synthetic
+      or 15/30 lb felt underlayment be added?
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: housewrap_missing_for_wall_sheathing
+    title: "Wall sheathing in bid but no housewrap"
+    scope: bid
+    action: question
+    applies_to:
+      absent_match:
+        category: housewrap
+      triggered_by_any:
+        - category: sheathing
+          context_keywords: [exterior wall, wall sheathing, stud wall]
+    missing_condition:
+      description: "Wall sheathing in scope but no housewrap / WRB line present."
+    question_template: >
+      Exterior wall sheathing is in the scope but there's no housewrap
+      (weather-resistive barrier) line. Should housewrap be added?
+    code_ref: null
+    basis: "common practice (verify)"
+
+  - id: hurricane_ties_for_roof_framing
+    title: "Rafter-to-plate hurricane ties"
+    scope: bid
+    action: question
+    applies_to:
+      absent_match:
+        category: connectors
+        name_contains: hurricane
+      triggered_by_any:
+        - category: dimensional_lumber
+          context_keywords: [rafter, roof framing, ridge, plate connection]
+    missing_condition:
+      description: "Roof rafters in scope but no hurricane-tie connector line present."
+    question_template: >
+      Roof rafters are in the scope. Should hurricane ties (e.g. H2.5A)
+      be added at rafter-to-plate connections?
+    code_ref: "IRC R802.11 (verify)"
+    basis: null

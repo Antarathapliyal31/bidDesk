@@ -22,46 +22,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError, model_validator
 
 from app.catalog.units import UNIT_CONVERSIONS, Dimension, SaleUnitSpec, Unit, canonicalize
+from app.common.yaml_io import YamlLoadError, read_yaml
 
 
 class SemanticLayerError(RuntimeError):
     """Raised when the semantic bundle fails any startup validation."""
-
-
-class _DuplicateKey(Exception):
-    """Internal — carried out of the YAML loader, re-raised as SemanticLayerError."""
-
-    def __init__(self, key: Any, line: int) -> None:
-        super().__init__(f"duplicate key '{key}' at line {line}")
-        self.key = key
-        self.line = line
-
-
-class _StrictSafeLoader(yaml.SafeLoader):
-    """SafeLoader that rejects duplicate mapping keys.
-
-    PyYAML's default silently keeps the last of duplicate keys, which hides
-    typos like declaring `r_value` twice under `fields:`. Overriding
-    `construct_mapping` makes that a hard error.
-    """
-
-    def construct_mapping(self, node: yaml.Node, deep: bool = False) -> dict[Any, Any]:
-        if not isinstance(node, yaml.MappingNode):
-            raise yaml.constructor.ConstructorError(
-                None, None, f"expected a mapping node, got {node.id}", node.start_mark
-            )
-        self.flatten_mapping(node)
-        mapping: dict[Any, Any] = {}
-        for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            if key in mapping:
-                raise _DuplicateKey(key, key_node.start_mark.line + 1)
-            mapping[key] = self.construct_object(value_node, deep=deep)
-        return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -212,26 +180,9 @@ _ENTITY_FILES: tuple[str, ...] = ("products", "stock", "branches")
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise SemanticLayerError(f"missing bundle file: {path.name}") from exc
-    except UnicodeDecodeError as exc:
-        raise SemanticLayerError(f"{path.name}: not valid UTF-8: {exc}") from exc
-    except OSError as exc:
-        raise SemanticLayerError(f"{path.name}: could not read file: {exc}") from exc
-    try:
-        data = yaml.load(text, Loader=_StrictSafeLoader)
-    except _DuplicateKey as exc:
-        raise SemanticLayerError(
-            f"{path.name}: duplicate key '{exc.key}' at line {exc.line}"
-        ) from exc
-    except yaml.YAMLError as exc:
-        raise SemanticLayerError(f"{path.name}: YAML parse error: {exc}") from exc
-    if data is None:
-        raise SemanticLayerError(f"{path.name}: file is empty")
-    if not isinstance(data, dict):
-        raise SemanticLayerError(f"{path.name}: top level must be a mapping")
-    return data
+        return read_yaml(path, missing_label="bundle file")
+    except YamlLoadError as exc:
+        raise SemanticLayerError(str(exc)) from exc
 
 
 def _validate_or_raise(model: type[BaseModel], data: Any, where: str) -> Any:
