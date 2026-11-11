@@ -1,4 +1,4 @@
-.PHONY: setup seed samples dev dev-backend dev-frontend test test-backend test-frontend lint check gen-api check-contract clean help
+.PHONY: setup seed samples samples-fe check-samples dev dev-backend dev-frontend test test-backend test-frontend lint check gen-api check-contract clean help
 
 PYTHON ?= python3.11
 VENV := backend/.venv
@@ -9,11 +9,13 @@ help:
 	@echo "BidDesk make targets:"
 	@echo "  setup           create venv + install backend[dev] + npm install"
 	@echo "  seed            build backend/data/catalog.db (Phase 1)"
-	@echo "  samples         generate samples/*.pdf (Phase 1)"
+	@echo "  samples         generate samples/*.pdf (Phase 1) + mirror to frontend/public/samples/"
+	@echo "  samples-fe      mirror samples/*.pdf + list_paste.txt → frontend/public/samples/"
+	@echo "  check-samples   fail if frontend/public/samples/ drifts from samples/ (byte-exact)"
 	@echo "  dev             run backend (:8000) and frontend (:5173) together"
 	@echo "  test            run backend pytest + frontend vitest"
 	@echo "  lint            ruff check + ruff format --check + eslint"
-	@echo "  check           lint + test (CI-equivalent sweep)"
+	@echo "  check           lint + check-samples + test (CI-equivalent sweep)"
 	@echo "  gen-api         regen frontend/openapi.json + src/api/schema.gen.ts (Phase 6)"
 	@echo "  check-contract  fail if generated contract files are stale (Phase 6)"
 	@echo "  clean           remove venv, node_modules, caches"
@@ -34,6 +36,32 @@ seed:
 
 samples:
 	$(VENV)/bin/python samples/make_samples.py
+	@$(MAKE) --no-print-directory samples-fe
+
+# Phase-7 only. Mirrors the backend's generated sample files into
+# frontend/public/samples/ so the New-bid "Start from a sample" cards
+# can fetch them offline. Removed at Phase 5 merge when
+# `GET /api/samples/{key}/file` lands.
+samples-fe:
+	@mkdir -p frontend/public/samples
+	@cp samples/rfp_clean.pdf    frontend/public/samples/rfp_clean.pdf
+	@cp samples/rfp_messy.pdf    frontend/public/samples/rfp_messy.pdf
+	@cp samples/rfp_scanned.pdf  frontend/public/samples/rfp_scanned.pdf
+	@cp samples/list_paste.txt   frontend/public/samples/list_paste.txt
+	@echo "samples-fe: 4 files mirrored into frontend/public/samples/"
+
+# Phase-7 only. Byte-exact drift check so a stale checkout fails loudly
+# instead of serving a different sample than the backend produced.
+# `cmp -s` exits 0 only when files are identical.
+check-samples:
+	@set -e; \
+	for f in rfp_clean.pdf rfp_messy.pdf rfp_scanned.pdf list_paste.txt; do \
+	  if ! cmp -s samples/$$f frontend/public/samples/$$f; then \
+	    echo "check-samples: $$f drifts between samples/ and frontend/public/samples/ — run 'make samples-fe'"; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo "check-samples: 4 files match."
 
 dev-backend:
 	cd backend && ../$(VENV)/bin/uvicorn app.main:app --reload --port 8000
@@ -57,7 +85,7 @@ lint:
 	cd backend && ../$(VENV)/bin/ruff check . && ../$(VENV)/bin/ruff format --check .
 	cd frontend && npm run lint
 
-check: lint test
+check: lint check-samples test
 
 gen-api:
 	@echo "gen-api: not yet implemented (Phase 6)."
