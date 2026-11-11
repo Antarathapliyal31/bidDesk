@@ -221,7 +221,7 @@ a prompt tweak.
 Decision: `branches.tax_rate_ppm` stores the branch's tax rate as an
 integer in parts-per-million. BidDesk North Jersey's 6.625% NJ state
 sales tax is `66250`. The tax multiply is half-up:
-`(cents * ppm + 500_000) // 1_000_000`.
+`(subtotal_cents * ppm + 500_000) // 1_000_000`.
 Because: Money is integer cents and the tax multiplier wants enough
 precision to represent real US breakpoints without a float
 intermediate. NJ's 6.625% in basis points is 662.5 bps — fractional,
