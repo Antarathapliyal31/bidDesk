@@ -1116,23 +1116,43 @@ Unit tests never call the real Anthropic API. Use `FakeLLM` (scripted responses 
 ## 13. HTTP API summary
 | Method & path | Body / query | Response |
 |---|---|---|
-| `POST /api/runs` | multipart: `file?` (PDF) or `text?`, `branch_id`, `faults?` (JSON, demo) | 201 `{run_id}`; 422 input errors |
-| `GET /api/runs` | `?limit&cursor&status` | `RunSummary[]` + next cursor |
-| `GET /api/runs/{id}` | — | `RunDetail` (status, outcome, input, pages routes, counts, token usage) |
+| `POST /api/runs` | multipart: `file?` (PDF) **xor** `text?`, `branch_id`, `faults?` (JSON array, demo). Both-or-neither of `file`/`text` → `invalid_input`. The server accepts `faults` absent OR `[]` interchangeably; a non-empty list requires `demo_faults_enabled=true`. | 201 `{run_id}`; 422 input errors |
+| `GET /api/runs` | `?limit&cursor&status`. `limit` default **20**, max **100** (server clamps — a larger request is not an error). `cursor` is opaque; the client never decodes. | `{items: RunSummary[], next_cursor: str|null}` — `RunSummary` includes `project_name`, `finalized_at`, `diff` (nullable) |
+| `GET /api/runs/{id}` | — | `RunDetail`: status, outcome, `outcome_detail`, input, pages routes, `branch` (embedded id/name/tax_rate_ppm), counts, `tokens_in`/`tokens_out`, **plus** `bid: Bid` (current authoritative — draft while editing, final once finalized), `agent_bid: Bid|null` (immutable revision 0, for diffing), `diff: BidDiff|null` |
 | `GET /api/runs/{id}/events` | `?after_id` | `RunEvent[]` |
 | `GET /api/runs/{id}/stream` | `Last-Event-ID` / `?after_id` | SSE of `RunEvent` |
 | `GET /api/runs/{id}/document` | — | `application/pdf` (404 for pasted text) |
 | `GET /api/runs/{id}/pages/{n}` | — | `{page_no, route, text, text_source}` |
-| `GET /api/runs/{id}/bid` | — | `{agent: Bid|null, draft: Bid|null, final: Bid|null, diff: BidDiff|null}` |
-| `PATCH /api/runs/{id}/bid/draft` | `{base_revision, ops: EditOp[]}` | `Bid` (draft); 409; 422 |
-| `POST /api/runs/{id}/bid/lines/{line_id}/reprice` | `{}` | `RepriceProposal` |
-| `POST /api/runs/{id}/bid/finalize` | `{draft_revision}` | `Bid` (final); 409; 422 `{open_line_ids}` |
+| `PATCH /api/runs/{id}/bid` | `{draft_revision, ops: EditOp[]}` | 200 `{bid: Bid}` (new authoritative); 409 `stale_revision` (details.current carries server's current Bid); 422 `invalid_input` (details.ops has per-op error list). Supersedes the earlier `PATCH /api/runs/{id}/bid/draft` sketch — the two-path design collapsed when `GET /api/runs/{id}` started carrying `bid` directly. |
+| `POST /api/runs/{id}/bid/lines/{line_id}/reprice` | `{}` | `RepriceProposal` = `{proposal_id, before: PricedLineView, after: PricedLineView}`. Nothing applied until an `apply_proposal` op lands in a `PATCH`. |
+| `POST /api/runs/{id}/bid/finalize` | `{draft_revision}` | 200 `{bid: Bid}` (the final, immutable); 409 `stale_revision`; 422 `open_flags` with `details.open_line_ids: string[]`. Idempotent — finalizing an already-final revision returns the existing final. |
 | `GET /api/branches` | — | `Branch[]` |
 | `GET /api/samples` / `GET /api/samples/{name}` | — | list / file |
-| `GET /api/meta` | — | `{demo_faults_enabled, models, limits}` |
+| `GET /api/meta` | — | `{demo_faults_enabled, faults, models, limits}` |
 | `GET /api/_contract/events` | — | `RunEvent[]` (exists for OpenAPI typing) |
 
-Errors use one shape: `{error: {code, message, details?}}`.
+**Totals + tax (server-only).** `extended_cents = ROUND_HALF_UP(Decimal(sale_qty) × unit_price_cents)` per priced line; `subtotal_cents = sum(extended_cents)`; `tax_cents = (subtotal_cents * tax_rate_ppm + 500_000) // 1_000_000` **once per bid** (half-up on a single subtotal, not per line — matches DECISIONS #11); `total_cents = subtotal_cents + tax_cents`. The frontend never recomputes — it renders what the server returns.
+
+**`transfer_options` sort (server-side, never the client):** `covers_shortfall` descending → `available_qty` descending → `branch_id` ascending (stable tie-breaker). SPEC §8.3's `transfer_options_json` carries `{branch_id, branch_name, available_qty, covers_shortfall}` per entry.
+
+**Errors.** Every non-2xx uses one shape: `{error: {code, message, details?}}`. Canonical codes:
+
+| code | HTTP | When |
+|---|---|---|
+| `invalid_input` | 422 | Catch-all for ingest validation (both/neither of `file`/`text`, missing `branch_id`, malformed PATCH ops). Server `message` describes the specific problem — the UI prefers it over a static copy. |
+| `pdf_encrypted` | 422 | Password-protected PDF. |
+| `pdf_corrupt` | 422 | Magic bytes mismatch or parser raised. |
+| `too_large` | 422 or 413 | Over `max_upload_mb`. `details.size_mb`, `details.limit_mb`. Also synthesized client-side from a bare HTTP 413 with no envelope. |
+| `too_many_pages` | 422 | Over `max_pages`. `details.page_count`, `details.max_pages`. |
+| `empty_input` | 422 | 0-byte file or `text.trim() == ""`. |
+| `text_too_long` | 422 | Pasted text over `max_text_chars` (code points, matches Python `len()`). `details.count`, `details.limit`. |
+| `unsupported_media` | 415 | Request body isn't one of the accepted content types. |
+| `invalid_branch` | 422 | `branch_id` not in the catalog. |
+| `run_not_found` | 404 | Run id unknown or its uploads were purged. |
+| `stale_revision` | 409 | `draft_revision` doesn't match server (§9.4). `details.current` carries the server's current Bid. |
+| `open_flags` | 422 | Finalize blocked by unresolved review lines (§9.6). `details.open_line_ids: string[]`. |
+| `network_error` | 0 | **Client-synthesized; never emitted by the server.** Produced locally when `fetch` rejects (no response reached the client). |
+| `server_error` | varies | **Client-synthesized; never emitted by the server.** Client fallback when the response isn't a well-formed envelope (HTML 500, unknown `code`). `details.raw_code: string|null` carries the original unknown code so the backend can patch the enum. |
 
 ---
 

@@ -320,6 +320,62 @@ If a legitimate item name ever contains one of these phrases the
 answer key has to be updated — acceptable because the strings are
 chosen from phrases that would never appear in a real LBM SKU.
 
+## 15. API shape deviations from SPEC §13 baseline — 2026-11-11
+Decision: SPEC §13 is amended, not worked around. The frontend-shell
+branch's `docs/API_CONTRACT.md` pinned real request/response shapes
+while building fixture-backed hooks; this entry records the shapes
+that changed and why. SPEC §13 now carries all of these verbatim;
+`API_CONTRACT.md` stays as the frontend-driven living doc and is
+deleted at Phase 5 when `make gen-api` emits types from the backend.
+Changes:
+  - `GET /api/runs/{id}/bid` removed. `GET /api/runs/{id}` carries
+    `bid` (current authoritative state), `agent_bid` (immutable
+    revision 0), and `diff`. One fetch per page.
+  - `PATCH /api/runs/{id}/bid/draft` → `PATCH /api/runs/{id}/bid`;
+    body field `base_revision` → `draft_revision`. Response is
+    `{bid: Bid}`, not a bare `Bid`. 409 carries `details.current`
+    (server's current Bid) so the UI can reconcile.
+  - Finalize response wrapped as `{bid: Bid}` for consistency.
+    Idempotent on an already-finalized revision.
+  - Error envelope stays `{error: {code, message, details?}}`; the
+    code enum is now canonical (14 codes) with per-code HTTP status
+    and `details` shape pinned in SPEC §13.
+  - Pagination defaults pinned: `limit` default **20**, max **100**,
+    server clamps (a larger request is not an error).
+  - `POST /api/runs` body: `file` xor `text`; both-or-neither →
+    `invalid_input`. `faults` lenient: absent OR `[]` interchangeable.
+  - `transfer_options` server-side sort pinned: `covers_shortfall`
+    desc → `available_qty` desc → `branch_id` asc. Fields:
+    `{branch_id, branch_name, available_qty, covers_shortfall}`.
+  - `RepriceProposal` shape pinned: `{proposal_id, before, after}`
+    of `PricedLineView`. Proposals are not applied until an
+    `apply_proposal` op lands in a PATCH.
+  - `RunSummary` adds `project_name`, `finalized_at`, `diff`.
+    `RunDetail` adds `outcome_detail`, embedded `branch` with
+    `tax_rate_ppm`, `tokens_in`/`tokens_out`.
+  - Totals/tax are server-only, once per bid, half-up:
+    `tax_cents = (subtotal_cents * tax_rate_ppm + 500_000) // 1_000_000`
+    (matches DECISIONS #11). The frontend never recomputes.
+Because: The two-endpoint draft/final split in the SPEC baseline
+echoed the state-machine in §9.4 but doubled every bid-fetch call
+site. Collapsing to one `bid` field (plus `agent_bid` for diffing)
+drops a round trip per render without losing the agent-revision-0
+audit trail — `bid_edits` keeps the full history. Pinning the error
+enum, pagination defaults and sort order pre-empts the usual
+"frontend and backend disagree in production" class of bug by
+making the shape a reviewed contract, not an implicit one.
+Alternatives considered: Keep SPEC §13 as-is and let the frontend
+adapt (two paths per bid surface, no audit of what's a draft); split
+`bid` and `final` into two fields (reintroduces the state-machine
+leak the collapse was meant to remove); leave the error enum
+informal (every new error becomes a UI copy conversation).
+Trade-off / known downside: A larger `GET /api/runs/{id}` response
+when a draft is open — the UI gets the full Bid every poll instead
+of only when it opens the editor. Mitigated by SSE: the live view
+patches via events, so the heavy GET is only on page load. Also:
+SPEC §13 and `docs/API_CONTRACT.md` now overlap; the contract file
+is explicitly temporary and marked for deletion at Phase 5 merge.
+
 ---
 
 ## Frontend entries (F1–F5)
