@@ -9,6 +9,25 @@ export {
   isApiError,
   type ApiErrorCode,
 } from "./ApiError";
+export type {
+  AgentName,
+  BudgetNotice,
+  ConflictSide,
+  ConflictView,
+  ItemKind,
+  ItemView,
+  PageRoute,
+  PricedLineView,
+  RunEvent,
+  RunEventType,
+  SourceRef,
+  TransferOption,
+} from "./events";
+export {
+  useRunStream,
+  type UseRunStreamOptions,
+  type UseRunStreamResult,
+} from "./useRunStream";
 export { useBranches, type Branch } from "./useBranches";
 export {
   useCreateRun,
