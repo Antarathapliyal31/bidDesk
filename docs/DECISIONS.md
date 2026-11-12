@@ -1024,6 +1024,98 @@ hook boundary. Mitigated at the user-visible surface (reducer
 validators, Zod on forms, test coverage), but the next step
 (adding `response_model=`) closes the gap.
 
+## F12. Orchestrator fans out Live-view events — 2026-11-12
+
+Decision: The orchestrator emits the per-item / per-page SSE events
+the Live view listens for. Before this entry, `/stream` only
+carried `run.started`, `span.*`, `tool.*`, `bid.ready`,
+`run.finished` — so ItemsStream, the live priced-line grid, and
+the conflict chip stayed empty during a real run (data was
+reachable only by parsing stringified `tool.result` previews).
+
+What now fires, and from where:
+
+- `page.routed` (one per analyst page_route entry) and
+  `item.extracted` (one per analyst item) — emitted in
+  `orchestrator/loop.py:run_orchestrator`, right after the analyst
+  delegate returns and before the model loop opens. Payloads are
+  `{page_no, route}` and `{item: ItemView}` per SPEC §10.3.
+- `item.priced` — one per priced row inside
+  `orchestrator/tools.py:_price_one_batch`, emitted AFTER
+  `repo.insert_price_result` commits. Payload wraps a full
+  `PricedLineView` (including `is_substitute` + `substitute_reason`
+  so the Live view's substitute badge can light up before
+  `bid.ready`).
+- `conflict.flagged` — one per accepted `handle_flag_conflict`
+  call, after `repo.insert_conflict` commits. Payload is the
+  `ConflictView` shape (`id`, `type`, `side_a`, `side_b`,
+  `explanation`).
+- `item.flagged` — mirrored onto each conflict side (reason_code
+  `in_conflict`), and emitted off priced rows for `failed` /
+  `timeout` / `no_match` / `needs_review` / `substitute` /
+  `shortfall` / `low_confidence` / `not_priced:*`. One reason per
+  row, priority matches SPEC §9.3 bullet 3.
+
+Scope guardrail: only `backend/app/agents/orchestrator/*` and
+`backend/app/contracts/pricing.py` changed. The analyst module
+(`backend/app/agents/analyst/*`) is untouched because another
+session is editing it in parallel. The orchestrator reads
+`analyst_result["page_routes"]` and fans out — it does NOT demand
+the analyst emit events itself.
+
+Contract change: `PricedLineView` grew two defaulted fields,
+`is_substitute: bool = False` and `substitute_reason: str | None
+= None`, to match `frontend/src/api/events.ts`. Defaults preserve
+backward compat for the 20 test sites that build non-substitute
+baselines (full backend suite stayed green after adding them).
+
+Persist-then-publish: every new emit goes through `EventBus.emit`,
+which validates against `RunEventAdapter` pre-persist and only
+publishes on a clean commit — a mid-handler exception never
+leaks half an event. The SSE route (`api/runs.py`) is unchanged;
+the frontend's named-event listeners (added in the last round)
+pick these up via `addEventListener(type, …)`.
+
+Tests: `backend/tests/agents/orchestrator/test_live_events.py` —
+five FakeLLM-scripted cases covering (a) full-loop event
+presence + ordering (`item.extracted` × 2 before `item.priced` × 2
+before `bid.ready`), (b) `item.extracted` payload shape vs
+ItemView, (c) `item.priced` payload shape vs PricedLineView
+including the defaulted substitute fields, (d) `conflict.flagged`
++ `item.flagged(in_conflict)` fan-out from `handle_flag_conflict`,
+(e) vision-side conflicts route to contractor_questions and emit
+NEITHER event.
+
+Alternatives considered: (a) parse `tool.result.result_preview`
+on the frontend — rejected: previews are truncated and labelled
+"preview" for a reason; the backend already has the typed data.
+(b) move the fan-out into `agents/analyst/*` — rejected: scope
+collision with the parallel analyst session, and the orchestrator
+is the correct owner because it decides when the analyst is
+authoritative. (c) add response_model= to GETs so the generated
+OpenAPI types shrink — deferred (F11 next step), orthogonal.
+
+Trade-off: the orchestrator now writes one more event per
+item/page/priced-line/conflict; on an rfp_messy run that's ~60
+extra events. `events` table is already indexed on `(run_id, id)`
+and the SSE replay drains them in one query, so the cost is
+negligible.
+
+Still NOT emitted (reported for the user to decide):
+
+| Type | What listens | UI effect of absence |
+|---|---|---|
+| `run.status` | `runReducer` updates `currentStep` label | Trace / header "current step" stays blank |
+| `agent.activity` | TraceView agent activity lane | No short status strings between tool calls |
+| `retry.scheduled` | TraceView retry chip on a span | Retries aren't visible mid-run |
+| `validation.failed` | TraceView validation-boundary chip | Boundary failures land in `tool.result(ok=false)` only |
+| `budget.exhausted` | LiveView BudgetNotice banner | Soft budget trips still fire this; the five `bus.emit` sites in `loop.py` cover the hard-trip paths |
+
+For the first four, only `runtime/trace.py` (span-level) and
+`runtime/retry.py` (retry/validation) know when to fire them —
+not the orchestrator — so leaving them is correct for this
+scope.
+
 ---
 
 ## Superseded notes

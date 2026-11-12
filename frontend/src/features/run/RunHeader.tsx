@@ -33,6 +33,14 @@ type Props = {
    * that aren't in the fixture history.
    */
   projectName: string | null;
+  /**
+   * Original filename from the run row (`GET /api/runs/{id}` →
+   * `input.name`). Preferred over `state.inputName`, which comes
+   * from `run.started.payload.input_name` — the backend sets that
+   * to the synthetic storage name `<run_id>.pdf`, not the name the
+   * user uploaded.
+   */
+  inputName: string | null;
 };
 
 function ConnectionChip({
@@ -76,15 +84,15 @@ function ConnectionChip({
   );
 }
 
-export function RunHeader({ runId, state, connection, projectName }: Props) {
-  // Title/subtitle (SPEC §11.5 "document feel"): project name as
-  // the title when the summary carries one (history rows set
-  // `project_name` in their `runs` row — fetched via
-  // `useRunSummary`). The input filename demotes to a subtitle.
-  // For runs without a project name (fresh bids), the filename
-  // is the title and there's no subtitle.
-  const title = projectName ?? state.inputName ?? runId;
-  const subtitle = projectName !== null ? state.inputName : null;
+export function RunHeader({ runId, state, connection, projectName, inputName }: Props) {
+  // Title/subtitle (SPEC §11.5 "document feel"): project name
+  // wins; otherwise the original filename from the run row;
+  // otherwise `state.inputName` (reducer-level, which carries the
+  // synthetic `<run_id>.pdf` the backend attaches to `run.started`);
+  // otherwise the runId.
+  const displayFilename = inputName ?? state.inputName;
+  const title = projectName ?? displayFilename ?? runId;
+  const subtitle = projectName !== null ? displayFilename : null;
   const isRunning = state.status === "running";
   // Elapsed comes from event ts, not Date.now() — see RunViewState
   // docs. One number, one source; Trace tab reads the same helper.

@@ -19,6 +19,10 @@ frontend/dist/
 
 # App data (seeded DBs, uploads)
 backend/data/*.db
+# SQLite WAL / shared-memory sidecars created when the DB is opened
+# with journal_mode=WAL — same lifecycle as the .db they belong to.
+backend/data/*.db-shm
+backend/data/*.db-wal
 backend/data/uploads/
 
 # OS

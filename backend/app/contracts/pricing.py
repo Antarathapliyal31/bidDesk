@@ -21,7 +21,11 @@ class PricedLineView(Contract):
     """Payload of `item.priced` on the SSE stream (SPEC §10.3).
 
     Field names match `BidLine` so the live-view code and the bid-view
-    code can share formatters.
+    code can share formatters. `is_substitute` + `substitute_reason`
+    ride along on the SSE payload so the Live view's substitute badge
+    can render as soon as the pricing agent commits — waiting until
+    `bid.ready` would hide that for minutes on a messy run (matches
+    `frontend/src/api/events.ts` PricedLineView).
     """
 
     item_id: str
@@ -36,6 +40,13 @@ class PricedLineView(Contract):
     confidence: ConfidenceLevel | None
     confidence_reasons: list[str]
     shortfall: Count | None
+    # Defaulted so existing callers that build a non-substitute line
+    # don't need to supply them; the Live view only cares when they
+    # flip to True / non-null. Matches `frontend/src/api/events.ts`
+    # PricedLineView — those fields are non-optional there but the
+    # non-substitute defaults are the common case.
+    is_substitute: StrictBool = False
+    substitute_reason: str | None = None
 
 
 class MatchAssumption(Contract):

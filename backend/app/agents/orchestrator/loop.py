@@ -330,6 +330,31 @@ async def run_orchestrator(
         due_date_text=analyst_result.get("due_date_text"),
     )
 
+    # Fan out per-page + per-item events the Live view listens for
+    # (SPEC §10.3). Done HERE in the orchestrator — not in the
+    # analyst — so the analyst stays a pure extractor and this
+    # branch doesn't touch `agents/analyst/*` (another session is
+    # editing that module). Persist-then-publish is handled inside
+    # `EventBus.emit`.
+    for pr in analyst_result.get("page_routes") or []:
+        page_no = pr.get("page_no")
+        route = pr.get("route")
+        if not isinstance(page_no, int) or not isinstance(route, str):
+            continue
+        await bus.emit(
+            type="page.routed",
+            run_id=run_id,
+            agent=AgentName.orchestrator,
+            payload={"page_no": page_no, "route": route},
+        )
+    for iv in items_views:
+        await bus.emit(
+            type="item.extracted",
+            run_id=run_id,
+            agent=AgentName.orchestrator,
+            payload={"item": iv.model_dump(mode="json")},
+        )
+
     # Persist items. They come in verified by the analyst; here
     # we just store them so the loop + assembly can read them back.
     now_iso = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
