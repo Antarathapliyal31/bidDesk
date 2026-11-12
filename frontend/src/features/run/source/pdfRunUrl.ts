@@ -1,31 +1,38 @@
 /**
  * Map a run id + input name to a PDF URL for the SourcePanel.
  *
- * Fixture mode: `run_demo_messy` → `/samples/rfp_messy.pdf`, plus
- * any other `run_demo_*` id falls back to the messy sample (same
- * reasoning as `getFixtureStream`'s prefix fallback). Returns null
- * for inputs we have no PDF for (paste runs, uploaded files the
- * browser didn't keep a blob URL for).
+ * Fixture mode: look up by the input filename, not the runId
+ * prefix — a history run that was submitted with rfp_clean.pdf
+ * must open rfp_clean.pdf, not whichever sample the fallback
+ * stream happens to reuse (bug: run_demo_b2 opened rfp_messy).
  *
- * Phase 5 merge: this file is replaced with a one-liner
- * `return `/api/runs/${runId}/source.pdf``. Keeping the helper
+ * The three sample PDFs live under `/samples/` and are shipped
+ * from `frontend/public/samples/`. Unknown filenames (e.g. the
+ * `corrupt.pdf` fixture row) return null; the SourcePanel then
+ * renders its "no PDF available" placeholder.
+ *
+ * Phase 5 merge: this file becomes a one-liner
+ *   return `/api/runs/${runId}/source.pdf`;
+ * and the backend decides what to serve. Keeping the helper
  * co-located with the SourcePanel means the swap is scoped to one
  * file.
  */
-/**
- * Demo-mode: every `run_demo_*` id resolves to the messy sample PDF
- * (same prefix-fallback as the SSE registry — see
- * `src/dev-fixtures/sse/index.ts`). Hard-coding the path here keeps
- * `features/` free of `@/dev-fixtures/*` imports (ESLint rule). The
- * Phase-5 merge deletes this file entirely.
- */
-const DEMO_PDF_URL = "/samples/rfp_messy.pdf";
+
+const SAMPLE_PDFS: Readonly<Record<string, string>> = {
+  "rfp_clean.pdf": "/samples/rfp_clean.pdf",
+  "rfp_messy.pdf": "/samples/rfp_messy.pdf",
+  "rfp_scanned.pdf": "/samples/rfp_scanned.pdf",
+};
 
 export function pdfUrlForRun(runId: string, inputName: string | null): string | null {
-  // Paste runs have no PDF — surface the callout only.
+  // Paste runs + non-PDF inputs have nothing to show.
   if (inputName === null) return null;
-  if (!inputName.toLowerCase().endsWith(".pdf")) return null;
+  const lower = inputName.toLowerCase();
+  if (!lower.endsWith(".pdf")) return null;
 
-  if (runId.startsWith("run_demo_")) return DEMO_PDF_URL;
-  return null;
+  // Only fixture-mode (demo) runs get a sample PDF. Non-demo
+  // runs would need `/api/runs/:id/source.pdf` — Phase 5.
+  if (!runId.startsWith("run_demo_")) return null;
+
+  return SAMPLE_PDFS[lower] ?? null;
 }
