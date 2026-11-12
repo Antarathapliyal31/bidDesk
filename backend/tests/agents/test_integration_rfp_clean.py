@@ -1,14 +1,17 @@
-"""End-to-end: run the orchestrator against `rfp_clean.pdf` with a
-scripted FakeLLM that mirrors `samples/expected/rfp_clean.json`.
+"""End-to-end: run the Document Analyst against `rfp_clean.pdf`
+with a scripted FakeLLM that mirrors
+`samples/expected/rfp_clean.json`.
 
 No real API calls. Proves:
   - Ingest + routing + extraction + verify compose.
   - Items from the FakeLLM get `source.verified=True` once code
     checks them against the real page text (SPEC §6.4).
-  - Orchestrator → delegate → analyst → return path is typed
-    all the way through.
   - `must_not_include` strings (header boilerplate) never land on
     items.
+
+Phase 5a turned the orchestrator into a model-driven loop, so
+this file calls the analyst via `delegate()` directly — the
+assertions are about analyst behavior, not orchestration.
 """
 
 from __future__ import annotations
@@ -19,11 +22,11 @@ from typing import Any
 
 import pytest_asyncio
 
-from app.agents.analyst.agent import register_default_analyst
-from app.agents.orchestrator.loop import RunPlan, run_orchestrator
+from app.agents.analyst.agent import AnalystRequest, register_default_analyst
+from app.contracts import AgentName, ItemView
 from app.db.init import Database
 from app.runtime.budgets import Budget
-from app.runtime.delegate import AgentContext, unregister_all
+from app.runtime.delegate import AgentContext, delegate, unregister_all
 from app.runtime.events import EventBus
 from app.runtime.llm import FakeLLM, ScriptedResponse
 from tests._seeds import seed_run
@@ -37,9 +40,8 @@ def _expected(name: str) -> dict[str, Any]:
 
 def _fake_llm_from_expected(expected: dict[str, Any]) -> FakeLLM:
     """Build a FakeLLM that returns a `report_extraction` payload
-    built from the expected JSON. That means the test loads the
-    same samples the Phase-1 answer-key produced, so hand-typed
-    counts are out of the loop (review rule 8)."""
+    built from the expected JSON. Hand-typed counts stay out of
+    the loop (review rule 8)."""
 
     items = [
         {
@@ -80,66 +82,39 @@ async def ctx(db: Database, bus: EventBus):
     unregister_all()
 
 
-class TestRfpCleanIntegration:
-    async def test_items_match_expected_and_verify(self, ctx: AgentContext, db: Database) -> None:
+async def _run_analyst(ctx: AgentContext, document_tag: str) -> list[ItemView]:
+    result = await delegate(
+        AgentName.document_analyst,
+        AnalystRequest(
+            kind="pdf",
+            pdf_path=str(_SAMPLES_ROOT / "rfp_clean.pdf"),
+            pasted_text=None,
+            document_tag=document_tag,
+        ),
+        ctx=ctx,
+    )
+    assert result.status == "ok", (result.status, [e.message for e in result.errors])
+    out = result.output.model_dump(mode="python")  # type: ignore[union-attr]
+    return [ItemView.model_validate(i) for i in out["items"]]
+
+
+class TestRfpCleanAnalyst:
+    async def test_items_match_expected_and_verify(self, ctx: AgentContext) -> None:
         expected = _expected("rfp_clean.json")
         register_default_analyst(_fake_llm_from_expected(expected))
+        items = await _run_analyst(ctx, "document_test_clean")
 
-        outcome = await run_orchestrator(
-            RunPlan(
-                kind="pdf",
-                pdf_path=str(_SAMPLES_ROOT / "rfp_clean.pdf"),
-                pasted_text=None,
-                branch_id="BR-NJ-01",
-                document_tag="document_test_clean",
-            ),
-            ctx=ctx,
-        )
-
-        # Count matches the expected items (materials + exclusions).
         expected_total = len(expected["items"]) + len(expected.get("exclusions", []))
-        assert len(outcome.items) == expected_total
+        assert len(items) == expected_total
 
-        # Every item verified against the real PDF's page text.
-        for item in outcome.items:
+        for item in items:
             assert item.source.verified is True, (
                 f"item {item.id} {item.description!r} failed to verify against real page text"
             )
             assert item.source.read_via == "text"
             assert "quote_not_found" not in item.notes
 
-        # must_not_include check: none of those strings appear in any
-        # item description or quote.
         for bad in expected["must_not_include"]:
-            for item in outcome.items:
+            for item in items:
                 assert bad not in item.description, f"'{bad}' leaked into {item.description!r}"
                 assert bad not in (item.source.quote or "")
-
-        # Orchestrator charged one turn.
-        assert ctx.budget.snapshot()["turns"] >= 1
-
-        # Submit_bid shim returned a non-empty summary.
-        assert outcome.summary, "submit_bid shim produced empty summary"
-
-    async def test_run_summary_has_no_dollar_amounts(self, ctx: AgentContext) -> None:
-        """SPEC §7.5 / §9.2: summary MUST NOT state prices or
-        totals. The Phase-3 shim summary is deterministic — it
-        counts sections only."""
-
-        expected = _expected("rfp_clean.json")
-        register_default_analyst(_fake_llm_from_expected(expected))
-        outcome = await run_orchestrator(
-            RunPlan(
-                kind="pdf",
-                pdf_path=str(_SAMPLES_ROOT / "rfp_clean.pdf"),
-                pasted_text=None,
-                branch_id="BR-NJ-01",
-                document_tag="document_test_clean_no_money",
-            ),
-            ctx=ctx,
-        )
-        import re
-
-        assert re.search(r"\$\s?\d", outcome.summary) is None, (
-            f"summary leaked a currency amount: {outcome.summary!r}"
-        )

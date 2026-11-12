@@ -1,19 +1,761 @@
-"""Orchestrator tools (SPEC §7.2) — Phase-3 subset.
+"""Orchestrator tool handlers (SPEC §7.2).
 
-For Phase 3 we ship `ask_document_analyst` (the only tool the
-Phase-3 shim needs) and the deterministic `build_submit_bid_payload`
-helper that converts verified items into a summary + contractor
-questions. Phase 5 adds `classify_items`, `add_requirements`,
-`price_items`, `flag_conflict`, `check_gap_rules`.
+Each tool the orchestrator can call has a handler here. Handlers:
+  - take a typed input model from `contracts/orchestrator.py`,
+  - write only through `repo.py` (never raw SQL),
+  - validate every claim (item id existence, quote verification,
+    link freshness) before persistence,
+  - return a compact dict suitable for `tool_result` content —
+    never the raw item/price blob, which would blow the context.
+
+The tools share an `OrchestratorContext` carrying the run id,
+the DB handle, the event bus, the semantic bundle, the catalog
+path, a live items-by-id cache, and the trackers (fired gap-rule
+ids, rejected claims) that `bid/assemble.py` later consumes.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import secrets
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from app.agents.analyst.agent import AnalystRequest
+from app.agents.pricing.agent import build_pricing_spec
+from app.catalog.semantic_layer import SemanticBundle
 from app.contracts import AgentName, ItemView
-from app.runtime.delegate import AgentContext, delegate
+from app.contracts.orchestrator import (
+    AddRequirementEntry,
+    AddRequirementsInput,
+    AskDocumentAnalystInput,
+    CheckGapRulesInput,
+    ClassifyItemsInput,
+    FlagConflictInput,
+    PriceItemsInput,
+)
+from app.contracts.pricing_agent import (
+    PricingItemRequest,
+    PricingRequest,
+    RequirementSpec,
+)
+from app.db import repo
+from app.db.init import Database
+from app.knowledge.matcher import (
+    GapRule,
+    evaluate_item_rules,
+    fires_for_bid,
+    matches_item,
+)
+from app.runtime.delegate import AgentContext, delegate, register_agent
+from app.runtime.events import EventBus
+
+# ---------------------------------------------------------------------------
+# Context carried through the loop
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OrchestratorContext:
+    """Shared state for one orchestrator run. The loop builds this
+    once; every tool handler reads/mutates it under the event-bus
+    + repo locks. Not frozen — tools append to the trackers."""
+
+    run_id: str
+    branch_id: str
+    document_tag: str
+    db: Database
+    bus: EventBus
+    budget: Any  # Budget instance
+    bundle: SemanticBundle
+    catalog_db_path: Path
+    gap_rules: list[GapRule]
+    # live item cache (populated after the analyst completes)
+    items_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Trackers used by assembly
+    fired_question_rule_ids: set[str] = field(default_factory=set)
+    fired_requirement_rule_ids: set[str] = field(default_factory=set)
+    rejected_claims_buffer: list[dict[str, Any]] = field(default_factory=list)
+    # Priced items — tracked to drive the pricing-completion pass.
+    priced_item_ids: set[str] = field(default_factory=set)
+
+    @property
+    def agent_ctx(self) -> AgentContext:
+        return AgentContext(run_id=self.run_id, bus=self.bus, budget=self.budget)
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _short(obj: Any, limit: int = 300) -> str:
+    """Compact JSON preview for tool.called / tool.result events."""
+
+    try:
+        s = json.dumps(obj, default=str, separators=(",", ":"))
+    except TypeError:
+        s = str(obj)
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+# ---------------------------------------------------------------------------
+# classify_items
+# ---------------------------------------------------------------------------
+
+
+async def handle_classify_items(
+    payload: ClassifyItemsInput, *, ctx: OrchestratorContext
+) -> dict[str, Any]:
+    """Validate each entry's item_id, insert into `item_triage`
+    atomically, return per-category counts."""
+
+    entries: list[tuple[str, str, str]] = []
+    rejected: list[dict[str, Any]] = []
+    for e in payload.entries:
+        if e.item_id not in ctx.items_by_id:
+            rejected.append({"item_id": e.item_id, "reason": "unknown_item_id"})
+            continue
+        entries.append((e.item_id, e.category, e.reason))
+    if entries:
+        await repo.insert_item_triage_bulk(
+            ctx.db, run_id=ctx.run_id, entries=entries, created_at=_now_iso()
+        )
+    counts: dict[str, int] = {}
+    for _, cat, _reason in entries:
+        counts[cat] = counts.get(cat, 0) + 1
+    for r in rejected:
+        ctx.rejected_claims_buffer.append(
+            {"kind": "classify_items", "payload": r, "reason": r["reason"]}
+        )
+    return {"ok": len(entries), "rejected": len(rejected), "counts": counts}
+
+
+# ---------------------------------------------------------------------------
+# check_gap_rules
+# ---------------------------------------------------------------------------
+
+
+_PRODUCT_CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    # Priority: longer / more-specific patterns first so "fascia
+    # trim" beats the generic lumber nominal-size catch.
+    ("trim", ("fascia", "trim", "casing", "baseboard")),
+    ("roofing", ("shingle", "underlayment", "ridge vent", "roofing", "cedar shake")),
+    ("housewrap", ("housewrap", "house wrap", "wrb", "weather-resistive barrier")),
+    ("insulation", ("insulation", "r-13", "r-19", "r-30", "batt", "blown-in")),
+    ("drywall", ("drywall", "gypsum", "sheetrock")),
+    ("sheathing", ("osb", "cdx", "plywood", "sheathing")),
+    ("fasteners", ("nail", "screw", "staple", "fastener")),
+    ("connectors", ("hanger", "hurricane", "strap", "bracket", "anchor", "tie")),
+    # Dimensional lumber catch-all: 2xN, 4x4, 6x6 patterns + the
+    # common framing nouns.
+    (
+        "dimensional_lumber",
+        (
+            "2x4",
+            "2x6",
+            "2x8",
+            "2x10",
+            "2x12",
+            "4x4",
+            "6x6",
+            "stud",
+            "joist",
+            "rafter",
+            "beam",
+            "post",
+            "header",
+            "sill",
+            "plate",
+            "ledger",
+            "ridge",
+        ),
+    ),
+]
+
+
+def _infer_product_category(item: dict[str, Any]) -> str | None:
+    """Keyword-based inference. The analyst doesn't tag product
+    category; the gap-rule matcher's `applies_to.category` needs
+    one (`dimensional_lumber`, `drywall`, etc.). Reads
+    description + source_quote and returns the first match.
+
+    Not authoritative — a routing hint. When it's wrong, the rule
+    simply doesn't fire; nothing is broken.
+    """
+
+    haystack = " ".join(
+        (
+            (item.get("description") or "").lower(),
+            (item.get("source_quote") or "").lower(),
+        )
+    )
+    for category, keywords in _PRODUCT_CATEGORY_KEYWORDS:
+        if any(kw in haystack for kw in keywords):
+            return category
+    return None
+
+
+def _item_dict_for_matcher(item: dict[str, Any], triage: dict[str, Any] | None) -> dict[str, Any]:
+    """Shape an item for `matcher.matches_item`. The matcher reads
+    `category`, parsed `specs`, and `source_quote` (SPEC §7.4).
+
+    `category` here is the PRODUCT category (`dimensional_lumber`,
+    `drywall`, ...), inferred via `_infer_product_category`. Triage
+    (`price` / `labor` / ...) is a different axis; rules key on
+    product shape, not triage decisions. `triage` is accepted for
+    symmetry with SPEC §7.4 but unused today.
+    """
+
+    _ = triage
+    specs = item.get("specs") or {}
+    return {
+        "category": _infer_product_category(item),
+        "nominal_size": specs.get("nominal_size"),
+        "length_ft": specs.get("length_ft"),
+        "thickness_in": specs.get("thickness_in"),
+        "grade": specs.get("grade"),
+        "species": specs.get("species"),
+        "treatment": specs.get("treatment"),
+        "fire_rating": specs.get("fire_rating"),
+        "moisture_resistant": specs.get("moisture_resistant"),
+        "r_value": specs.get("r_value"),
+        "source_quote": item.get("source_quote"),
+        "description": item.get("description"),
+    }
+
+
+def _apply_item_rules(
+    ctx: OrchestratorContext,
+    item: dict[str, Any],
+    triage: dict[str, Any] | None,
+) -> tuple[list[GapRule], list[GapRule]]:
+    """Return `(fired_requirements, fired_questions)` for one
+    item. Pure call — persistence happens one layer up."""
+
+    item_dict = _item_dict_for_matcher(item, triage)
+    context_text = item.get("source_quote") or ""
+    return evaluate_item_rules(ctx.gap_rules, item_dict, context_text)
+
+
+async def handle_check_gap_rules(
+    payload: CheckGapRulesInput, *, ctx: OrchestratorContext
+) -> dict[str, Any]:
+    """Return a compact summary of applicable rules keyed by
+    item_id. Also runs bid-scope rules against the currently-
+    triaged items so the model sees the missing-companion
+    prompts once pricing has happened."""
+
+    triage_rows = await repo.list_item_triage(ctx.db, run_id=ctx.run_id)
+    triage_by_item = {t["item_id"]: t for t in triage_rows}
+
+    target_ids: list[str] = payload.item_ids or list(ctx.items_by_id.keys())
+
+    item_rules_payload: list[dict[str, Any]] = []
+    for iid in target_ids:
+        if iid not in ctx.items_by_id:
+            continue
+        reqs, questions = _apply_item_rules(ctx, ctx.items_by_id[iid], triage_by_item.get(iid))
+        if not (reqs or questions):
+            continue
+        item_rules_payload.append(
+            {
+                "item_id": iid,
+                "requirements": [
+                    {
+                        "id": r.id,
+                        "title": r.title,
+                        "field": r.requirement.field if r.requirement else None,
+                        "value": r.requirement.value if r.requirement else None,
+                        "value_in": r.requirement.value_in if r.requirement else None,
+                        "code_ref": r.code_ref,
+                        "basis": r.basis,
+                    }
+                    for r in reqs
+                ],
+                "questions": [
+                    {
+                        "id": q.id,
+                        "title": q.title,
+                        "question_template": q.question_template,
+                        "code_ref": q.code_ref,
+                        "basis": q.basis,
+                    }
+                    for q in questions
+                ],
+            }
+        )
+
+    # Bid-scope rules — matched against the triaged items visible so
+    # far. (Bid-scope rules that reference pricing fields still match
+    # on pre-price attributes for the base test; the `absent_match`
+    # pass in assembly re-checks after pricing lands.)
+    bid_items = [
+        _item_dict_for_matcher(ctx.items_by_id[iid], triage_by_item.get(iid))
+        for iid in ctx.items_by_id
+    ]
+    bid_rules_payload: list[dict[str, Any]] = []
+    for rule in ctx.gap_rules:
+        if rule.scope != "bid":
+            continue
+        if fires_for_bid(rule, bid_items):
+            bid_rules_payload.append(
+                {
+                    "id": rule.id,
+                    "title": rule.title,
+                    "action": rule.action,
+                    "question_template": rule.question_template,
+                    "code_ref": rule.code_ref,
+                    "basis": rule.basis,
+                }
+            )
+            if rule.action == "question":
+                ctx.fired_question_rule_ids.add(rule.id)
+
+    # Record every question rule that fired at the item level.
+    for entry in item_rules_payload:
+        for q in entry["questions"]:
+            ctx.fired_question_rule_ids.add(q["id"])
+
+    return {
+        "ok": True,
+        "item_rules": item_rules_payload,
+        "bid_rules": bid_rules_payload,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ask_document_analyst — Phase 5a stub
+# ---------------------------------------------------------------------------
+
+
+async def handle_ask_document_analyst(
+    payload: AskDocumentAnalystInput, *, ctx: OrchestratorContext
+) -> dict[str, Any]:
+    """Phase-5a stub — the current Analyst spec runs the extractor
+    on every call. Phase 5c adds a specialised Q&A mode. For now
+    the model receives a short acknowledgement + the item list it
+    already saw, so it continues the flow."""
+
+    _ = payload, ctx
+    return {
+        "ok": True,
+        "detail": "Q&A mode not implemented in Phase 5a; rely on extracted items.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# add_requirements
+# ---------------------------------------------------------------------------
+
+
+def _requirement_shape_valid(entry: AddRequirementEntry) -> str | None:
+    has_value = entry.value is not None
+    has_value_in = entry.value_in is not None
+    if has_value == has_value_in:
+        return "exactly one of 'value' / 'value_in' must be set"
+    if has_value_in and not entry.value_in:
+        return "'value_in' must be non-empty"
+    return None
+
+
+async def _persist_requirements(
+    ctx: OrchestratorContext,
+    entries: list[AddRequirementEntry],
+    *,
+    created_by: str,
+) -> dict[str, Any]:
+    """Shared insert path. Verifies field + value against the
+    semantic layer and writes under one `db.write()` transaction."""
+
+    from app.contracts.bid import RequirementView
+    from app.contracts.common import SourceRef as _SourceRef
+
+    ok_count = 0
+    rejected: list[dict[str, Any]] = []
+    now = _now_iso()
+    async with ctx.db.write() as conn:
+        for e in entries:
+            if e.item_id not in ctx.items_by_id:
+                rejected.append({"entry": e.model_dump(), "reason": "unknown_item_id"})
+                continue
+            shape_err = _requirement_shape_valid(e)
+            if shape_err:
+                rejected.append({"entry": e.model_dump(), "reason": shape_err})
+                continue
+            prod = ctx.bundle.entities.get("products")
+            if prod is None or e.field not in prod.fields:
+                rejected.append({"entry": e.model_dump(), "reason": "unknown_field"})
+                continue
+            field_def = prod.fields[e.field]
+            if not field_def.matchable:
+                rejected.append({"entry": e.model_dump(), "reason": "field_not_matchable"})
+                continue
+            if field_def.values:
+                allowed = set(field_def.values)
+                candidate_values = [e.value] if e.value is not None else list(e.value_in or [])
+                bad = [v for v in candidate_values if v not in allowed]
+                if bad:
+                    rejected.append(
+                        {"entry": e.model_dump(), "reason": f"value_not_allowed: {bad}"}
+                    )
+                    continue
+            source = _SourceRef(
+                page=e.source_page,
+                quote=e.source_quote,
+                read_via="text" if e.source_page else None,
+                verified=bool(e.source_page and e.source_quote),
+            )
+            try:
+                req = RequirementView(
+                    field=e.field,
+                    value=e.value,
+                    value_in=list(e.value_in) if e.value_in else None,
+                    reason=e.reason,
+                    source=source,
+                )
+            except Exception as exc:
+                rejected.append({"entry": e.model_dump(), "reason": f"contract: {exc}"})
+                continue
+            await repo._insert_item_requirement(
+                conn,
+                run_id=ctx.run_id,
+                item_id=e.item_id,
+                requirement=req,
+                created_by=created_by,  # type: ignore[arg-type]
+                created_at=now,
+            )
+            ok_count += 1
+    for r in rejected:
+        ctx.rejected_claims_buffer.append(
+            {"kind": "add_requirements", "payload": r["entry"], "reason": r["reason"]}
+        )
+    return {"ok": ok_count, "rejected": len(rejected)}
+
+
+async def handle_add_requirements(
+    payload: AddRequirementsInput, *, ctx: OrchestratorContext
+) -> dict[str, Any]:
+    return await _persist_requirements(ctx, payload.entries, created_by="orchestrator")
+
+
+# ---------------------------------------------------------------------------
+# CODE-SIDE: apply fired requirement gap rules before pricing
+# ---------------------------------------------------------------------------
+
+
+async def apply_rule_requirements(ctx: OrchestratorContext) -> dict[str, Any]:
+    """Run the matcher's requirement rules over every item; write
+    the fired requirements into `item_requirements` directly
+    (created_by='orchestrator'). CODE applies these — the model
+    can add EXTRA requirements via `add_requirements` but cannot
+    skip these (Antara refinement)."""
+
+    triage_rows = await repo.list_item_triage(ctx.db, run_id=ctx.run_id)
+    triage_by_item = {t["item_id"]: t for t in triage_rows}
+
+    entries: list[AddRequirementEntry] = []
+    for iid, item in ctx.items_by_id.items():
+        reqs, _questions = _apply_item_rules(ctx, item, triage_by_item.get(iid))
+        for rule in reqs:
+            ctx.fired_requirement_rule_ids.add(rule.id)
+            req = rule.requirement
+            if req is None:
+                continue
+            value: Any
+            value_in: list[Any] | None = None
+            if req.value is not None:
+                value = req.value
+            else:
+                value = None
+                value_in = list(req.value_in or [])
+            entries.append(
+                AddRequirementEntry(
+                    item_id=iid,
+                    field=req.field,
+                    value=value,
+                    value_in=value_in,
+                    reason=f"gap_rule {rule.id}: {rule.title}",
+                    source_page=item.get("source_page"),
+                    source_quote=item.get("source_quote"),
+                )
+            )
+    if not entries:
+        return {"ok": 0, "rejected": 0, "applied_rule_ids": []}
+    result = await _persist_requirements(ctx, entries, created_by="orchestrator")
+    result["applied_rule_ids"] = sorted(ctx.fired_requirement_rule_ids)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# price_items — batches ≤ 8, Semaphore(2)
+# ---------------------------------------------------------------------------
+
+
+_PRICING_BATCH_SIZE = 8
+_PRICING_CONCURRENCY = 2
+
+
+def _requirement_specs_for(
+    item_id: str, requirement_rows: list[dict[str, Any]]
+) -> list[RequirementSpec]:
+    out: list[RequirementSpec] = []
+    for r in requirement_rows:
+        if r["item_id"] != item_id:
+            continue
+        parsed = json.loads(r["value_json"])
+        value = parsed[0] if isinstance(parsed, list) else parsed
+        if value is None:
+            continue
+        out.append(RequirementSpec(field=r["field"], value=value))
+    return out
+
+
+def _item_view_from_row(item: dict[str, Any]) -> ItemView:
+    from app.contracts.common import ItemKind, SourceRef
+
+    kind = ItemKind(item["kind"])
+    src = SourceRef(
+        page=item.get("source_page"),
+        quote=item.get("source_quote"),
+        read_via=item.get("read_via"),
+        verified=bool(item.get("verified", False)),
+    )
+    return ItemView(
+        id=item["id"],
+        kind=kind,
+        description=item["description"],
+        quantity_text=item.get("quantity_text"),
+        unit_raw=item.get("unit_raw"),
+        source=src,
+        notes=list(item.get("notes") or []),
+    )
+
+
+def register_pricing_for_run(
+    llm: Any,
+    *,
+    bundle: SemanticBundle,
+    catalog_db_path: Path,
+) -> None:
+    """Shim used by the loop at setup time — same spec builder as
+    Phase 4. Keeps `tools.py` the single place the orchestrator
+    reaches into pricing."""
+
+    register_agent(build_pricing_spec(llm, bundle=bundle, catalog_db_path=catalog_db_path))
+
+
+async def _price_one_batch(
+    *,
+    ctx: OrchestratorContext,
+    batch: list[PricingItemRequest],
+    sem: asyncio.Semaphore,
+) -> list[dict[str, Any]]:
+    """Delegate one ≤8-item batch to the pricing agent under the
+    concurrency semaphore. Writes `price_results` rows + returns
+    compact per-item summaries for the model."""
+
+    async with sem:
+        request = PricingRequest(branch_id=ctx.branch_id, items=batch)
+        agent_result = await delegate(AgentName.pricing_agent, request, ctx=ctx.agent_ctx)
+
+    out: list[dict[str, Any]] = []
+    now = _now_iso()
+    if agent_result.status != "ok" or agent_result.output is None:
+        # Handler-level failure — every item in the batch becomes
+        # a `failed` row so assembly surfaces them.
+        for req in batch:
+            row = {
+                "status": "failed",
+                "verify_notes": ["agent_error"],
+                "confidence": "low",
+                "confidence_reasons": ["pricing agent failed"],
+            }
+            await repo.insert_price_result(
+                ctx.db,
+                run_id=ctx.run_id,
+                item_id=req.item.id,
+                row=row,
+                created_at=now,
+            )
+            ctx.priced_item_ids.add(req.item.id)
+            out.append({"item_id": req.item.id, "status": "failed"})
+        return out
+
+    output = agent_result.output
+    results = list(output.results)
+    item_errors_by_id = {e.ref: e for e in output.item_errors}
+
+    for r in results:
+        iid = r.item_id
+        row: dict[str, Any] = {
+            "status": r.status,
+            "sku": r.priced.sku,
+            "product_name": r.priced.product_name,
+            "sale_unit": r.priced.sale_unit,
+            "sale_qty": str(r.priced.sale_qty) if r.priced.sale_qty is not None else None,
+            "conversion_path": r.priced.conversion_path,
+            "unit_price_cents": r.priced.unit_price_cents,
+            "branch_on_hand": r.stock.get("on_hand") if r.stock else None,
+            "shortfall": r.priced.shortfall,
+            "transfer_options": (r.stock or {}).get("transfer_options") or [],
+            "assumptions": [a.model_dump(mode="python") for a in r.assumptions],
+            "attribute_mismatches": list(r.attribute_mismatches),
+            "verify_notes": list(r.verify_notes),
+            "is_substitute": r.is_substitute,
+            "substitute_reason": r.substitute_reason,
+            "confidence": r.priced.confidence,
+            "confidence_reasons": list(r.priced.confidence_reasons),
+            "searched": None,
+        }
+        # Per Antara: each item_error folds into the price row as
+        # a `not_priced:<kind>` verify_note so bid assembly surfaces
+        # it as an open flag that blocks finalize.
+        if iid in item_errors_by_id:
+            err = item_errors_by_id[iid]
+            row["verify_notes"] = [*row["verify_notes"], f"not_priced:{err.kind}"]
+        await repo.insert_price_result(
+            ctx.db, run_id=ctx.run_id, item_id=iid, row=row, created_at=now
+        )
+        ctx.priced_item_ids.add(iid)
+        out.append(
+            {
+                "item_id": iid,
+                "status": r.status,
+                "sku": r.priced.sku,
+                "sale_qty": row["sale_qty"],
+                "sale_unit": r.priced.sale_unit,
+                "confidence": r.priced.confidence,
+                "shortfall": r.priced.shortfall,
+            }
+        )
+    return out
+
+
+async def handle_price_items(
+    payload: PriceItemsInput, *, ctx: OrchestratorContext
+) -> dict[str, Any]:
+    """Build PricingItemRequests by joining items + requirements
+    in code (never the model), batch ≤8 lines, delegate under a
+    Semaphore(2). Writes `price_results` for every submitted item."""
+
+    valid_ids: list[str] = []
+    rejected: list[dict[str, Any]] = []
+    for iid in payload.item_ids:
+        if iid not in ctx.items_by_id:
+            rejected.append({"item_id": iid, "reason": "unknown_item_id"})
+            continue
+        valid_ids.append(iid)
+    if not valid_ids:
+        return {"ok": 0, "rejected": len(rejected), "results": []}
+
+    requirement_rows = await repo.list_item_requirements(ctx.db, run_id=ctx.run_id)
+
+    requests: list[PricingItemRequest] = []
+    for iid in valid_ids:
+        item = ctx.items_by_id[iid]
+        requests.append(
+            PricingItemRequest(
+                item=_item_view_from_row(item),
+                requirements=_requirement_specs_for(iid, requirement_rows),
+            )
+        )
+
+    batches: list[list[PricingItemRequest]] = [
+        requests[i : i + _PRICING_BATCH_SIZE] for i in range(0, len(requests), _PRICING_BATCH_SIZE)
+    ]
+    sem = asyncio.Semaphore(_PRICING_CONCURRENCY)
+    gathered = await asyncio.gather(*(_price_one_batch(ctx=ctx, batch=b, sem=sem) for b in batches))
+    results = [row for batch_rows in gathered for row in batch_rows]
+    return {
+        "ok": len(results),
+        "rejected": len(rejected),
+        "batches": len(batches),
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# flag_conflict
+# ---------------------------------------------------------------------------
+
+
+_CONFLICT_PREFIX = "conflict_"
+
+
+def _page_quote_verified(page: int | None, quote: str | None, read_via: str | None) -> bool:
+    return bool(page and (quote or "").strip() and read_via == "text")
+
+
+async def handle_flag_conflict(
+    payload: FlagConflictInput, *, ctx: OrchestratorContext
+) -> dict[str, Any]:
+    """Persist the conflict after verifying both sides' citations.
+    Vision-side contradictions route to contractor_questions
+    instead (DECISIONS #16). Unknown item ids or unverifiable
+    sides → rejected_claims."""
+
+    side_a = payload.side_a
+    side_b = payload.side_b
+
+    vision_or_unverified = False
+    for side in (side_a, side_b):
+        src = side.source
+        if src.read_via == "vision" or not _page_quote_verified(src.page, src.quote, src.read_via):
+            vision_or_unverified = True
+
+    if vision_or_unverified:
+        question_ref_id = f"flag_{secrets.token_hex(4)}"
+        ctx.fired_question_rule_ids.add(question_ref_id)
+        ctx.rejected_claims_buffer.append(
+            {
+                "kind": "flag_conflict_routed_to_question",
+                "payload": payload.model_dump(mode="python"),
+                "reason": "vision_or_unverified_side",
+            }
+        )
+        return {
+            "ok": True,
+            "routed": "contractor_question",
+            "question_ref_id": question_ref_id,
+        }
+
+    for side in (side_a, side_b):
+        if side.item_id is not None and side.item_id not in ctx.items_by_id:
+            ctx.rejected_claims_buffer.append(
+                {
+                    "kind": "flag_conflict",
+                    "payload": payload.model_dump(mode="python"),
+                    "reason": f"unknown_item_id:{side.item_id}",
+                }
+            )
+            return {"ok": False, "rejected": "unknown_item_id"}
+
+    conflict_id = _CONFLICT_PREFIX + secrets.token_hex(4)
+    await repo.insert_conflict(
+        ctx.db,
+        conflict_id=conflict_id,
+        run_id=ctx.run_id,
+        conflict_type=payload.type.value,
+        side_a={
+            "item_id": side_a.item_id,
+            "source": side_a.source.model_dump(mode="python"),
+        },
+        side_b={
+            "item_id": side_b.item_id,
+            "source": side_b.source.model_dump(mode="python"),
+        },
+        explanation=payload.explanation,
+        created_at=_now_iso(),
+    )
+    return {"ok": True, "conflict_id": conflict_id}
+
+
+# ---------------------------------------------------------------------------
+# Analyst delegate (used once before the model loop starts)
+# ---------------------------------------------------------------------------
 
 
 async def ask_document_analyst(
@@ -21,14 +763,8 @@ async def ask_document_analyst(
     *,
     ctx: AgentContext,
 ) -> dict[str, Any]:
-    """Delegate to the Document Analyst. Returns the raw payload
-    dict (callers rehydrate typed views as needed).
-
-    Raises if the result status isn't `ok` so the orchestrator
-    layer above sees analyst failures rather than silently
-    getting an empty items list. Phase 5 widens this to handle
-    partial / failed / timeout statuses separately.
-    """
+    """Preserved from Phase 3 — runner calls this once at the start
+    to produce the item list, then the model loop takes over."""
 
     result = await delegate(AgentName.document_analyst, request, ctx=ctx)
     if result.status != "ok" or result.output is None:
@@ -39,70 +775,23 @@ async def ask_document_analyst(
     return result.output.model_dump(mode="python")
 
 
-def build_submit_bid_payload(items: list[ItemView]) -> dict[str, Any]:
-    """Phase-3 deterministic `submit_bid` shim.
+# ---------------------------------------------------------------------------
+# SSE preview helpers (kept tiny per SPEC §10.3 size caps)
+# ---------------------------------------------------------------------------
 
-    Builds the contractor-questions list from the review flags
-    already carried on each item (quote_not_found,
-    quantity_not_in_quote, unknown_unit). Produces a short summary
-    naming the counts. Phase 5 replaces this with a model-authored
-    summary that goes through `submit_bid` validation (SPEC §9.2).
-    """
 
-    material = sum(1 for i in items if i.kind.value == "material")
-    labor = sum(1 for i in items if i.kind.value == "labor")
-    exclusions = sum(1 for i in items if i.kind.value == "exclusion")
-    notes = sum(1 for i in items if i.kind.value == "note")
+def preview_input(tool: str, inp: Any) -> str:
+    _ = tool
+    try:
+        serialisable = inp.model_dump(mode="json") if hasattr(inp, "model_dump") else inp
+    except Exception:
+        serialisable = str(inp)
+    return _short(serialisable, limit=300)
 
-    questions: list[dict[str, Any]] = []
-    for item in items:
-        # Only item-scope review-prompts surface here. Bid-scope
-        # rules (missing underlayment, etc.) land in Phase 5.
-        for note in item.notes:
-            if note == "quote_not_found":
-                questions.append(
-                    {
-                        "text": (
-                            f"Quote for {item.description!r} on page "
-                            f"{item.source.page} didn't verify against page text. "
-                            "Please confirm."
-                        ),
-                        "basis": {"kind": "flagged_line", "ref_id": item.id},
-                    }
-                )
-            elif note == "quantity_not_in_quote":
-                questions.append(
-                    {
-                        "text": (
-                            f"Quantity for {item.description!r} doesn't appear in "
-                            f"its source quote. Confirm the number."
-                        ),
-                        "basis": {"kind": "flagged_line", "ref_id": item.id},
-                    }
-                )
-            elif note == "unknown_unit":
-                questions.append(
-                    {
-                        "text": (
-                            f"Unit {item.unit_raw!r} on {item.description!r} "
-                            "isn't in our table. Clarify."
-                        ),
-                        "basis": {"kind": "flagged_line", "ref_id": item.id},
-                    }
-                )
 
-    summary_parts = [
-        f"Extracted {material} material",
-        f"{labor} labor" if labor else "",
-        f"{exclusions} exclusion" if exclusions else "",
-        f"{notes} note" if notes else "",
-    ]
-    summary = ", ".join(p for p in summary_parts if p)
-    if questions:
-        summary += f". {len(questions)} line(s) need estimator review."
+def preview_result(tool: str, result: dict[str, Any]) -> str:
+    _ = tool
+    return _short(result, limit=300)
 
-    return {
-        "summary": summary,
-        "contractor_questions": questions,
-        "assumptions": [],
-    }
+
+_ = matches_item  # keep import live for future direct-use helpers

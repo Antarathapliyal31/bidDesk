@@ -797,6 +797,81 @@ ItemError, invented-SKU-never-becomes-no_match).
 
 ---
 
+## Phase 5a — Orchestrator + bid assembly
+
+The Phase-3 orchestrator shim is replaced with a real
+model-driven tool loop that writes a validated `Bid` through
+code-only assembly. Pricing + analyst are reused via `delegate()`.
+
+- `app/contracts/orchestrator.py` — Pydantic tool-input models
+  (`ClassifyItemsInput`, `CheckGapRulesInput`, `AddRequirementsInput`,
+  `PriceItemsInput`, `FlagConflictInput`, `SubmitBidInput`,
+  `AskDocumentAnalystInput`), `extra='forbid'` + strict.
+- `app/agents/orchestrator/prompts.py` — system prompt (SPEC §7.5)
+  + 6 tool JSON schemas (`ask_document_analyst` schema kept in
+  file but excluded from `ALL_TOOLS` until Phase 5c, so no no-op
+  tool shows in the trace). `tool_choice=auto` pattern per
+  DECISIONS #21.
+- `app/agents/orchestrator/tools.py` — handler per tool
+  (`handle_classify_items`, `handle_check_gap_rules`,
+  `handle_add_requirements`, `handle_price_items`,
+  `handle_flag_conflict`, plus the code-only
+  `apply_rule_requirements` that writes rule-fired requirements
+  before the model loop starts). `register_pricing_for_run`
+  wires the pricing spec once per run. Product-category keyword
+  inference feeds the gap-rule matcher.
+- `app/agents/orchestrator/loop.py` — the real loop. Analyst
+  kickoff → `apply_rule_requirements` (code) → model turns up to
+  16 (Antara-sized for rfp_messy) → pricing completion pass
+  (SPEC §7.3, 30s deadline floor) → bid assembly. Duplicate
+  guard via canonical-JSON per tool. Budgets propagate → fallback
+  on exhaustion. `submit_bid` validation (SPEC §9.2 summary rules
+  + Phase-5a commitment words) with one shape-error retry.
+  Emits `tool.called` / `tool.result` / `agent.activity` /
+  `budget.exhausted` / `bid.ready`.
+- `app/bid/__init__.py`, `bid/totals.py`, `bid/assemble.py` —
+  code-only assembly. Sections, review-reason propagation
+  (incl. `needs_review` → `not_priced` open flag + `in_conflict`),
+  totals half-up once per bid, link validation
+  (assumptions must correspond to recorded assumptions/requirements;
+  contractor questions' basis.ref_id must exist), fallback summary
+  template, no_materials outcome. Writes `agent_bid` (kind=agent,
+  rev=0, immutable) + `draft_bid` (kind=draft, rev=1) in one
+  write transaction. Rejected narrative claims → `rejected_claims`.
+- `app/db/repo.py` — added triage / price_results / conflicts /
+  rejected_claims / fetch helpers (`list_items`, `list_item_triage`,
+  `list_item_requirements`, `list_conflicts`,
+  `latest_price_result_per_item`). All writes under `db.write()`.
+
+Phase-3 analyst integration tests (`test_integration_rfp_clean.py`,
+`test_integration_rfp_messy.py`) now call the Document Analyst
+directly via `delegate()` since the orchestrator shim is gone.
+
+Tests:
+- `tests/bid/test_totals.py` (9 tests — half-up tax arithmetic,
+  rounding boundaries, line counters).
+- `tests/bid/test_assemble.py` (26 tests — summary validation,
+  section routing, review-reason propagation incl.
+  `needs_review` → `not_priced`, link validation drops,
+  no_materials outcome, fallback summary template, totals
+  identity, agent/draft parity).
+- `tests/agents/orchestrator/test_tools.py` (9 tests — classify
+  valid/unknown, `apply_rule_requirements` applies sill-plate PT
+  rule without the model, `check_gap_rules` tracks rule ids,
+  add_requirements rejects unknown field / non-matchable /
+  value-not-in-enum / stores valid, flag_conflict persists
+  text-verified / routes vision to question).
+- `tests/agents/orchestrator/test_tool_surface.py` (4 tests —
+  `ask_document_analyst` NOT in `ALL_TOOLS`, NOT in dispatch,
+  NOT in system prompt).
+- `tests/agents/orchestrator/test_loop_happy_path.py` — scripted
+  FakeLLM e2e: analyst + pricing + orchestrator all through one
+  pass, validates `agent_bid` + `draft_bid` persistence, SSE
+  events (`tool.called`, `tool.result`, `bid.ready`), status =
+  `completed` with `generated_by=orchestrator`.
+
+---
+
 # Phase 6 (frontend-shell branch)
 
 ## docs/API_CONTRACT.md (new, temporary)
