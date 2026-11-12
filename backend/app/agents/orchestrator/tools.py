@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -175,15 +176,53 @@ _PRODUCT_CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ),
 ]
 
+# Spec regex library. The matcher reads structural specs from
+# `item.nominal_size` / `item.length_ft` / `item.thickness_in` /
+# `item.r_value` / `item.fire_rating` to decide `applies_to` +
+# `triggered_when` — so these need to be inferable from the raw
+# description when the analyst hasn't parsed them. Semantic
+# specs (`treatment`, `moisture_resistant`, `grade`, `species`)
+# are deliberately NOT inferred: leaving them null is what makes
+# requirement-scope rules fire with `missing_condition.not_in`
+# / `not_equals` / `is_null`. Code-side gap rules then stamp
+# those values into `item_requirements`.
 
-def _infer_product_category(item: dict[str, Any]) -> str | None:
-    """Keyword-based inference. The analyst doesn't tag product
-    category; the gap-rule matcher's `applies_to.category` needs
-    one (`dimensional_lumber`, `drywall`, etc.). Reads
-    description + source_quote and returns the first match.
+_NOMINAL_SIZE_RE = re.compile(r"\b(2x\d+|4x4|6x6)\b", re.IGNORECASE)
+# Matches "x 16'", "x 16 ft", "x16ft" etc. after a nominal size.
+_LENGTH_FT_RE = re.compile(
+    r"\d+x\d+\s*x\s*(\d+)\s*(?:'|ft\b)",
+    re.IGNORECASE,
+)
+# Fractional inch: "7/16", "1/2", "5/8", "3/4", "23/32", "3/8".
+# Only matches when `in`, `inch`, or `drywall/sheathing` is
+# nearby; keep the pattern itself loose and let category gating
+# in `_infer_specs` decide whether to attach it.
+_THICKNESS_IN_RE = re.compile(r"\b(\d+/\d+)(?:\s*in(?:ch)?)?\b")
+_R_VALUE_RE = re.compile(r"\br[-\s]?(\d{1,3})\b", re.IGNORECASE)
 
-    Not authoritative — a routing hint. When it's wrong, the rule
-    simply doesn't fire; nothing is broken.
+
+def _infer_specs(item: dict[str, Any]) -> dict[str, Any]:
+    """Infer product category + structural specs from the raw
+    description + source_quote so the gap-rule matcher's
+    `applies_to` + `triggered_when` clauses can fire. SPEC §7.4
+    describes this as the analyst's job; we backfill in the
+    orchestrator because the analyst doesn't tag specs yet.
+
+    Keys returned:
+      - category: see `_PRODUCT_CATEGORY_KEYWORDS`.
+      - nominal_size: the first `2xN` / `4x4` / `6x6` token (upper-
+        cased to match the YAML enum).
+      - length_ft: from `… x 16'` / `… x 16 ft` patterns.
+      - thickness_in: from `7/16` / `1/2` / `5/8` / `3/4` /
+        `23/32` / `3/8` when the item is drywall / sheathing.
+      - r_value: from `R-19` / `R19` patterns.
+      - fire_rating: `type_x` when "Type X" appears in text.
+
+    `treatment`, `moisture_resistant`, `grade`, and `species` are
+    intentionally LEFT NULL — the requirement-scope gap rules
+    (pt_sill_plates_on_concrete, pt_posts_in_ground,
+    wet_area_drywall_mr, etc.) fire on exactly those missing
+    specs and stamp them into `item_requirements`.
     """
 
     haystack = " ".join(
@@ -192,39 +231,199 @@ def _infer_product_category(item: dict[str, Any]) -> str | None:
             (item.get("source_quote") or "").lower(),
         )
     )
-    for category, keywords in _PRODUCT_CATEGORY_KEYWORDS:
+
+    category: str | None = None
+    for cat, keywords in _PRODUCT_CATEGORY_KEYWORDS:
         if any(kw in haystack for kw in keywords):
-            return category
-    return None
+            category = cat
+            break
+
+    nominal_size: str | None = None
+    m = _NOMINAL_SIZE_RE.search(haystack)
+    if m:
+        # Normalise to the lower-case `2x6` / `4x4` form the
+        # products.yaml enum uses.
+        nominal_size = m.group(1).lower().replace("x", "x")
+
+    length_ft: int | None = None
+    m = _LENGTH_FT_RE.search(haystack)
+    if m:
+        try:
+            length_ft = int(m.group(1))
+        except ValueError:
+            length_ft = None
+
+    thickness_in: str | None = None
+    if category in ("drywall", "sheathing"):
+        m = _THICKNESS_IN_RE.search(haystack)
+        if m:
+            thickness_in = m.group(1)
+
+    r_value: int | None = None
+    m = _R_VALUE_RE.search(haystack)
+    if m:
+        try:
+            r_value = int(m.group(1))
+        except ValueError:
+            r_value = None
+
+    fire_rating: str | None = None
+    if "type x" in haystack or "typex" in haystack:
+        fire_rating = "type_x"
+
+    return {
+        "category": category,
+        "nominal_size": nominal_size,
+        "length_ft": length_ft,
+        "thickness_in": thickness_in,
+        "r_value": r_value,
+        "fire_rating": fire_rating,
+    }
 
 
 def _item_dict_for_matcher(item: dict[str, Any], triage: dict[str, Any] | None) -> dict[str, Any]:
     """Shape an item for `matcher.matches_item`. The matcher reads
     `category`, parsed `specs`, and `source_quote` (SPEC §7.4).
 
-    `category` here is the PRODUCT category (`dimensional_lumber`,
-    `drywall`, ...), inferred via `_infer_product_category`. Triage
-    (`price` / `labor` / ...) is a different axis; rules key on
-    product shape, not triage decisions. `triage` is accepted for
-    symmetry with SPEC §7.4 but unused today.
+    Structural specs are inferred via `_infer_specs`. Semantic
+    specs (`treatment`, `moisture_resistant`, `grade`, `species`)
+    stay null in this view so requirement-scope rules fire; code
+    applies those requirements into `item_requirements`, and
+    `_merge_requirements_into_item_view` overlays them before the
+    POST-PRICING matcher pass.
+
+    `triage` is accepted for SPEC §7.4 symmetry but unused.
     """
 
     _ = triage
+    inferred = _infer_specs(item)
     specs = item.get("specs") or {}
     return {
-        "category": _infer_product_category(item),
-        "nominal_size": specs.get("nominal_size"),
-        "length_ft": specs.get("length_ft"),
-        "thickness_in": specs.get("thickness_in"),
+        "category": specs.get("category") or inferred["category"],
+        "nominal_size": specs.get("nominal_size") or inferred["nominal_size"],
+        "length_ft": specs.get("length_ft") or inferred["length_ft"],
+        "thickness_in": specs.get("thickness_in") or inferred["thickness_in"],
         "grade": specs.get("grade"),
         "species": specs.get("species"),
         "treatment": specs.get("treatment"),
-        "fire_rating": specs.get("fire_rating"),
+        "fire_rating": specs.get("fire_rating") or inferred["fire_rating"],
         "moisture_resistant": specs.get("moisture_resistant"),
-        "r_value": specs.get("r_value"),
+        "r_value": specs.get("r_value") or inferred["r_value"],
         "source_quote": item.get("source_quote"),
         "description": item.get("description"),
     }
+
+
+def _merge_requirements_into_item_view(
+    item_view: dict[str, Any], requirement_rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Overlay recorded requirements onto a matcher-view item dict
+    so POST-pricing rules see code-stamped specs. A requirement
+    with `value_in` picks the first value (same convention as the
+    matcher's own `evaluate_item_rules`)."""
+
+    merged = dict(item_view)
+    for req in requirement_rows:
+        field = req.get("field")
+        if not field:
+            continue
+        parsed = json.loads(req["value_json"])
+        value = parsed[0] if isinstance(parsed, list) else parsed
+        if value is None:
+            continue
+        merged[field] = value
+    return merged
+
+
+async def apply_rule_questions(ctx: OrchestratorContext) -> list[dict[str, Any]]:
+    """POST-pricing deterministic gap-rule pass.
+
+    Reads items + item_requirements, overlays requirements onto
+    each item's matcher view (so bid-scope rules that need
+    `treatment` etc. see them), and evaluates:
+
+      - item-scope question rules (one per matching item);
+      - bid-scope rules (action='question') once per rule.
+
+    Returns a list of `{text, basis}` dicts ready for assembly to
+    drop straight into `contractor_questions`. Also updates
+    `ctx.fired_question_rule_ids` so model-authored
+    `basis.kind='gap_rule'` references pointing at THESE rules
+    survive assembly's link validation.
+    """
+
+    requirement_rows = await repo.list_item_requirements(ctx.db, run_id=ctx.run_id)
+    reqs_by_item: dict[str, list[dict[str, Any]]] = {}
+    for r in requirement_rows:
+        reqs_by_item.setdefault(r["item_id"], []).append(r)
+    triage_rows = await repo.list_item_triage(ctx.db, run_id=ctx.run_id)
+    triage_by_item = {t["item_id"]: t for t in triage_rows}
+
+    code_questions: list[dict[str, Any]] = []
+    seen_item_question_keys: set[tuple[str, str]] = set()
+    seen_bid_rule_ids: set[str] = set()
+
+    # Build the merged view per item for bid-scope matching.
+    merged_views: list[dict[str, Any]] = []
+    for iid, item in ctx.items_by_id.items():
+        view = _item_dict_for_matcher(item, triage_by_item.get(iid))
+        view = _merge_requirements_into_item_view(view, reqs_by_item.get(iid, []))
+        merged_views.append(view)
+        # Item-scope QUESTION rules fire per item.
+        context_text = item.get("source_quote") or ""
+        for rule in ctx.gap_rules:
+            if rule.scope != "item" or rule.action != "question":
+                continue
+            if matches_item(rule, view, context_text):
+                key = (rule.id, iid)
+                if key in seen_item_question_keys:
+                    continue
+                seen_item_question_keys.add(key)
+                text = _fill_question_template(rule.question_template, rule.title, view)
+                code_questions.append(
+                    {
+                        "text": text,
+                        "basis": {"kind": "gap_rule", "ref_id": rule.id},
+                    }
+                )
+                ctx.fired_question_rule_ids.add(rule.id)
+
+    # Bid-scope rules (question action) — matched against the
+    # merged view set so absent_match can see pricing output too.
+    for rule in ctx.gap_rules:
+        if rule.scope != "bid" or rule.action != "question":
+            continue
+        if rule.id in seen_bid_rule_ids:
+            continue
+        if fires_for_bid(rule, merged_views):
+            seen_bid_rule_ids.add(rule.id)
+            text = (rule.question_template or rule.title or "").strip()
+            code_questions.append(
+                {
+                    "text": text or f"Review required: {rule.id}",
+                    "basis": {"kind": "gap_rule", "ref_id": rule.id},
+                }
+            )
+            ctx.fired_question_rule_ids.add(rule.id)
+
+    return code_questions
+
+
+def _fill_question_template(template: str | None, title: str, item: dict[str, Any]) -> str:
+    """Minimal placeholder expansion. Today the templates in
+    gap_rules.yaml are self-contained — if they ever carry
+    `{nominal_size}` / `{description}` tokens, best-effort fill
+    from the merged item view."""
+
+    base = (template or title or "").strip()
+    if not base:
+        return "Review required"
+    # Avoid KeyError when the template references a field we
+    # don't have; fall back to the raw template.
+    try:
+        return base.format(**item)
+    except (KeyError, IndexError):
+        return base
 
 
 def _apply_item_rules(

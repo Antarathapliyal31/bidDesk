@@ -46,6 +46,7 @@ from app.agents.orchestrator.prompts import (
 )
 from app.agents.orchestrator.tools import (
     OrchestratorContext,
+    apply_rule_questions,
     apply_rule_requirements,
     ask_document_analyst,  # code-only kickoff call, not a model tool
     handle_add_requirements,
@@ -384,7 +385,10 @@ async def run_orchestrator(
     shape_error_retries_left = SHAPE_ERROR_RETRIES
     last_submit_error: str | None = None
 
+    budget_tripped = False
     for _turn in range(MAX_ORCHESTRATOR_TURNS + 1):
+        if budget_tripped:
+            break
         try:
             orch_ctx.budget.assert_alive()
         except BudgetExhausted as exc:
@@ -418,7 +422,20 @@ async def run_orchestrator(
             )
             break
 
-        orch_ctx.budget.charge(turns=1)
+        try:
+            orch_ctx.budget.charge(turns=1)
+        except BudgetExhausted as exc:
+            # charge() raises when the turn counter overflows
+            # exactly here — treat the same as any other
+            # mid-loop exhaustion: record + emit + break.
+            partial_reasons.append(f"budget_exhausted({exc.which})")
+            await bus.emit(
+                type="budget.exhausted",
+                run_id=run_id,
+                agent=AgentName.orchestrator,
+                payload={"budget": exc.which, "detail": exc.detail},
+            )
+            break
         await _emit_agent_activity(bus, run_id, _text_from(response))
 
         tool_uses = _tool_use_blocks(response)
@@ -555,6 +572,10 @@ async def run_orchestrator(
                     result = await handler(payload, ctx=orch_ctx)
                     is_error = False
                 except BudgetExhausted as exc:
+                    # Pricing agent (or any sub-agent) tripped the
+                    # shared budget mid-handler. Record + stop the
+                    # loop cleanly so assembly can run with a
+                    # fallback summary.
                     partial_reasons.append(f"budget_exhausted({exc.which})")
                     await bus.emit(
                         type="budget.exhausted",
@@ -562,7 +583,9 @@ async def run_orchestrator(
                         agent=AgentName.orchestrator,
                         payload={"budget": exc.which, "detail": exc.detail},
                     )
-                    raise
+                    budget_tripped = True
+                    result = {"ok": False, "error": f"budget_exhausted({exc.which})"}
+                    is_error = True
                 except Exception as exc:
                     result = {"ok": False, "error": str(exc)}
                     is_error = True
@@ -597,7 +620,10 @@ async def run_orchestrator(
         # for-else: ran out of turns without breaking.
         partial_reasons.append(f"turn_limit reached ({MAX_ORCHESTRATOR_TURNS})")
 
-    # 4. Pricing completion pass.
+    code_authored_questions: list[dict[str, Any]] = []
+    # 4. Pricing completion pass. A BudgetExhausted here is a
+    # signal that the run already blew its ceiling; fall through
+    # to fallback assembly with that reason recorded.
     async with trace_span(
         bus,
         run_id=run_id,
@@ -605,8 +631,33 @@ async def run_orchestrator(
         label="price items the model skipped",
         agent=AgentName.orchestrator,
     ):
-        _, cp_partial = await _run_completion_pass(orch_ctx)
-    partial_reasons.extend(cp_partial)
+        try:
+            _, cp_partial = await _run_completion_pass(orch_ctx)
+            partial_reasons.extend(cp_partial)
+        except BudgetExhausted as exc:
+            partial_reasons.append(f"pricing completion pass: budget_exhausted({exc.which})")
+            await bus.emit(
+                type="budget.exhausted",
+                run_id=run_id,
+                agent=AgentName.orchestrator,
+                payload={"budget": exc.which, "detail": exc.detail},
+            )
+
+    # 4a. Code-side gap-rule QUESTION pass (item + bid scope).
+    # Runs AFTER the completion pass so bid-scope `absent_match`
+    # patterns see the final catalog assignments (and so
+    # `apply_rule_questions` reads a consistent requirements set).
+    async with trace_span(
+        bus,
+        run_id=run_id,
+        name="apply_rule_questions",
+        label="code-side gap-rule questions",
+        agent=AgentName.orchestrator,
+    ):
+        try:
+            code_authored_questions = await apply_rule_questions(orch_ctx)
+        except BudgetExhausted as exc:
+            partial_reasons.append(f"apply_rule_questions: budget_exhausted({exc.which})")
 
     # 5. Assemble.
     generated_by = GeneratedBy.orchestrator if submit_bid_input else GeneratedBy.fallback
@@ -618,6 +669,7 @@ async def run_orchestrator(
         submit=submit_bid_input,
         generated_by=generated_by,
         partial_reasons=partial_reasons,
+        code_authored_questions=code_authored_questions,
     )
     result = build_bid(assembly_input)
 
@@ -721,6 +773,7 @@ async def _build_assembly_input(
     submit: SubmitBidInput | None,
     generated_by: GeneratedBy,
     partial_reasons: list[str],
+    code_authored_questions: list[dict[str, Any]],
 ) -> AssemblyInput:
     """Snapshot the run's state for `bid/assemble.build_bid`."""
 
@@ -737,9 +790,27 @@ async def _build_assembly_input(
     summary = submit.summary if submit else ""
     assumptions = [a.model_dump(mode="python") for a in submit.assumptions] if submit else []
     questions = [q.model_dump(mode="python") for q in submit.contractor_questions] if submit else []
+    # Code-side question rules land straight into
+    # contractor_questions. If the model already authored a
+    # question for the same gap_rule ref_id, the MODEL'S phrasing
+    # wins (it saw the run state); otherwise the code template
+    # fills in. ref_ids come from `apply_rule_questions`'s
+    # updates to `fired_question_rule_ids`.
+    model_question_ref_ids = {
+        (q["basis"].get("kind"), q["basis"].get("ref_id"))
+        for q in questions
+        if isinstance(q.get("basis"), dict)
+    }
+    for q in code_authored_questions:
+        key = (q["basis"]["kind"], q["basis"]["ref_id"])
+        if key in model_question_ref_ids:
+            continue
+        questions.append(q)
+        model_question_ref_ids.add(key)
 
     # Gap-rule ids used by `_valid_questions` include question-scope
-    # rules recorded by `check_gap_rules` + flag_conflict.
+    # rules recorded by `check_gap_rules` + flag_conflict +
+    # `apply_rule_questions`.
     gap_rule_ids = set(orch_ctx.fired_question_rule_ids)
 
     return AssemblyInput(
