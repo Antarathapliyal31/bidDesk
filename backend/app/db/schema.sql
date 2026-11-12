@@ -192,7 +192,7 @@ CREATE TABLE IF NOT EXISTS price_results (
   confidence_reasons_json    TEXT NOT NULL DEFAULT '[]',
   searched                   TEXT,
   created_at                 TEXT NOT NULL,
-  CONSTRAINT price_results_status_ck     CHECK (status IN ('matched','substitute','no_match','failed','timeout','skipped')),
+  CONSTRAINT price_results_status_ck     CHECK (status IN ('matched','substitute','no_match','needs_review','failed','timeout','skipped')),
   CONSTRAINT price_results_confidence_ck CHECK (confidence IS NULL OR confidence IN ('high','medium','low')),
   FOREIGN KEY (run_id, item_id) REFERENCES items(run_id, id)
 );

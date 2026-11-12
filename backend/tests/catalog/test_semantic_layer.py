@@ -96,8 +96,13 @@ class TestHappyPath:
     def test_loads_real_bundle(self, catalog_db: Path) -> None:
         bundle = load_bundle(_BUNDLE_DIR, catalog_db)
         assert set(bundle.entities) == {"products", "stock", "branches"}
-        assert len(bundle.dimensions) == 3
-        assert {d.name for d in bundle.dimensions} == {"length", "area", "board_measure"}
+        assert len(bundle.dimensions) == 4
+        assert {d.name for d in bundle.dimensions} == {
+            "length",
+            "area",
+            "board_measure",
+            "count",
+        }
         assert "insulation" in bundle.sanity_ranges
         assert any(sr.unit == "ROLL" for sr in bundle.sanity_ranges["roofing"])
         assert "treatment_ambiguity" in bundle.playbooks

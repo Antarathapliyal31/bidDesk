@@ -85,6 +85,7 @@ OUR_TABLE: dict[str, Unit] = {
     # BOX
     "box": Unit.BOX,
     "boxes": Unit.BOX,
+    "bx": Unit.BOX,
     # LB
     "lb": Unit.LB,
     "lbs": Unit.LB,
@@ -277,6 +278,19 @@ def board_feet_to_pieces(base_qty_bf: Decimal, nominal_size: str, length_ft: int
     return _ceil_decimal(base_qty_bf / bfp)
 
 
+def pieces_to_boxes(base_qty_ea: Decimal, pack_qty: int) -> int:
+    """EA (base) → BOX for fasteners: `pieces / pack_qty`.
+
+    Example: 500 nails, pack_qty=100 → 5 BOX. Ceiled, so 501 → 6.
+    Needed because item quantities land as EA while fastener SKUs
+    sell as BOX (SPEC §8.1).
+    """
+
+    if pack_qty <= 0:
+        raise ValueError(f"pack_qty must be > 0, got {pack_qty}")
+    return _ceil_decimal(base_qty_ea / Decimal(pack_qty))
+
+
 def _bf_per_piece(nominal_size: str, length_ft: int) -> Decimal:
     """Board feet of one piece. Private helper — not a top-level conversion."""
     t, _, w = nominal_size.partition("x")
@@ -290,6 +304,7 @@ UNIT_CONVERSIONS: dict[str, Callable[..., int]] = {
     "area_to_coverage_units": area_to_coverage_units,
     "squares_to_bundles": squares_to_bundles,
     "board_feet_to_pieces": board_feet_to_pieces,
+    "pieces_to_boxes": pieces_to_boxes,
 }
 
 
@@ -508,4 +523,6 @@ def _path_suffix(function: str, sale_unit: str, kwargs: dict[str, Any]) -> str:
     if function == "board_feet_to_pieces":
         bfp = _bf_per_piece(kwargs["nominal_size"], kwargs["length_ft"])
         return f"({kwargs['nominal_size']}x{kwargs['length_ft']} = {_fmt(bfp)} BF/piece)"
+    if function == "pieces_to_boxes":
+        return f"(pack_qty = {kwargs['pack_qty']})"
     return ""

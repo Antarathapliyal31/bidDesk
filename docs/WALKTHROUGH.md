@@ -673,6 +673,130 @@ additions to `tests/runtime/test_llm.py`.
 
 ---
 
+## Phase 4 — Pricing Agent
+
+Pricing Agent: query the catalog via the semantic layer, propose
+SKU matches + substitutes + assumptions. Code (never the model)
+reads prices, converts units, checks ranges, computes
+confidence, builds transfer options. The agent's multi-turn tool
+loop ends in a forced `submit_matches` (same `tool_choice=auto`
+pattern as the analyst per DECISIONS #21).
+
+- `app/catalog/query_builder.py` — `CatalogQuery` (Literal
+  entity=products, filters dict, optional text_search ≤ 60 chars,
+  limit 1–20). `build_sql(entity, query, *, branch_id)` returns
+  `(sql, params)`; identifiers come only from the YAML allowlist,
+  values are always bound `?`. Every query ALWAYS LEFT-JOINs
+  `stock` for the run's branch_id and ALWAYS appends
+  `p.active = 1` — same pattern per SPEC §8.2. `_check_type`
+  rejects type mismatches: bool fields reject int, int fields
+  reject bool (traps `isinstance(True, int)` returning True),
+  text/enum fields reject non-str. `run_named_query("stock_all_
+  branches", [sku])` is code-only — the agent cannot invoke it.
+  `QueryBuilderError` is the model-recoverable error that
+  surfaces as `is_error=True` in a `tool_result`.
+- `app/contracts/pricing_agent.py` — `PricingRequest` (branch_id
+  + ≤8 `PricingItemRequest`s each carrying `ItemView` +
+  `RequirementSpec`s); `MatchProposal` (what the model emits via
+  submit_matches); `PricingLineResult` (what verify builds —
+  `priced` PricedLineView + loose `stock` dict + `verify_notes` +
+  `attribute_mismatches`); `PricingResult(status: Literal["ok",
+  "partial"], results, item_errors: list[ItemError])`;
+  `ItemError{ref=item_id, kind, message}`.
+- `app/agents/pricing/prompts.py` — `QUERY_CATALOG_TOOL` (schema
+  requires `item_id`), `SUBMIT_MATCHES_TOOL`. System prompt pins:
+  "Never state prices. SKUs only from query_catalog. One SKU per
+  item. Call submit_matches exactly once at the end." `user_
+  prompt(Spotlighted, branch_id)` — Spotlighted-only, same
+  typing guardrail as analyst.
+- `app/agents/pricing/extraction.py` — `run_pricing_loop`. Each
+  turn: budget.assert_alive → llm.call with `messages=[...]` and
+  the two tools → scan content blocks for submit_matches (end)
+  or query_catalog (continue). Per query_catalog call: pull
+  `item_id`, merge that item's `requirements` into filters
+  (CODE does this, not the model — hard constraints like
+  `treatment=pressure_treated_...` are never dropped), build
+  CatalogQuery, execute, record returned SKUs in a per-item
+  candidate set. Multiple tool_use blocks per turn are handled
+  (one tool_result each). On `max_steps` hit WITHOUT submit:
+  return `PricingLoopOutcome(submit=None,
+  partial_item_ids=[...])` — a soft outcome, NOT a raise.
+  `PricingShapeError` only fires on a malformed response (no
+  tool_use at all, or submit payload that fails Pydantic).
+- `app/agents/pricing/confidence.py` — pure. Inputs: is_
+  substitute, attribute_mismatches, assumptions on matchable
+  fields, item.source.verified, read_via, unit_via_pint →
+  ConfidenceLevel + human-readable reasons. Low triggers
+  (substitute / mismatch / unverified) absorb medium reasons too
+  so the trace is complete. Match certainty only; sanity_range
+  etc. live in verify_notes.
+- `app/agents/pricing/transfers.py` — `transfer_options_for(sku,
+  *, shortfall, home_branch_id, catalog_db_path)` runs the
+  code-only `stock_all_branches` named query, excludes the home
+  branch, puts full-cover rows first (on_hand DESC, branch_id
+  ASC) then partials (same sort, `cover="N of M"` labeled per
+  SPEC §8.3 step 7).
+- `app/agents/pricing/verify.py` — code decides. Per SPEC §8.3:
+  (1) candidate-set check RUNS FIRST — invented SKUs never
+  touched the catalog so they're caught here; on first attempt
+  raises `CandidateSetViolation` for delegate's retry, on retry
+  soft-fails the single item with verify_note "candidate_set".
+  (2) catalog-existence → missing-but-in-candidates edge yields
+  status=failed + verify_note "hallucinated_sku" (NOT no_match —
+  no_match is reserved for `sku=None`). (3) price, sale_unit,
+  name, on_hand copied from DB row. (4) unit conversion via
+  `convert_item_to_sale_qty` incl. pint fallback. (5) sanity
+  range → `sanity_range:<max>` in verify_notes, flagged but
+  never auto-changed. (6) attribute_mismatches from
+  requirement↔product comparison. (7) shortfall+transfers.
+  (8) confidence from confidence.py. Returns VerifyOutcome
+  (results + candidate_set_failures) so the handler can build
+  `item_errors`.
+- `app/agents/pricing/agent.py` — `AgentSpec` registration +
+  `_PricingHandler`. On delegate retry (`feedback is not None`),
+  verify runs with `is_retry=True` so per-item failures don't
+  explode the batch. `_build_item_errors` folds candidate_set /
+  hallucinated_sku / max_steps_exceeded / missing_proposal into
+  `ItemError(ref=item_id, kind, message)` entries. PricingResult
+  carries status="partial" iff any item_errors.
+- `app/catalog/semantic/conversions.yaml` — added `count`
+  dimension (`EA` base → `BOX` sale via `pieces_to_boxes` using
+  `pack_qty`) so fasteners stated in individual pieces price
+  into their BOX sale_unit. BOX-as-item (already-in-boxes) stays
+  identity-passthrough via step 1.
+- `app/catalog/units.py` — added `pieces_to_boxes(base_qty_ea,
+  pack_qty)` with ceil; `bx` → `BOX` in OUR_TABLE;
+  `_path_suffix` renders "(pack_qty = N)" on the conversion path.
+- `app/runtime/llm.py` — `AnthropicLLM.call()` grew optional
+  `system=` and `messages=[...]` kwargs so the pricing loop can
+  carry multi-turn conversation state. `ScriptedResponse.content`
+  loosened to `dict | list` so FakeLLM can emit SDK-shape block
+  lists for tool-loop tests.
+- `scripts/smoke_pricing.py` — real-API smoke against
+  `samples/list_paste.txt`. Same credentials discipline as
+  smoke_analyst (`.env`-only, no keychain / OAuth / CLI flags,
+  never prints the key). Reports per-batch: delegate status,
+  pricing status (ok/partial), matched/substitute/no_match/
+  failed counts, expected-SKU accuracy, item_errors, tokens,
+  wall time. `--list` prints each PricedLineView with marker
+  ✓/·, sku, qty+unit, price, confidence, verify_notes.
+
+Tests: `tests/catalog/test_query_builder.py` (16 tests —
+allowlist, type validation, branch join, active=1 guardrail,
+text_search LIKE, named queries). `tests/agents/pricing/`:
+`test_confidence.py` (pure, 9 tests), `test_transfers.py` (sort
++ exclusion rules), `test_extraction.py` (FakeLLM multi-turn —
+happy path, requirement merging incl. sill-plate PT, multi-
+tool-use per turn, max_steps soft outcome, shape errors),
+`test_verify.py` (10 tests — candidate-set on first
+attempt vs retry, hallucinated-SKU edge, no_match validity,
+partial from max_steps, attribute mismatches, sanity range),
+`test_integration_list_paste.py` (delegate end-to-end: 8-item
+batch, box identity, pack_qty EA→BOX, partial batch with
+ItemError, invented-SKU-never-becomes-no_match).
+
+---
+
 # Phase 6 (frontend-shell branch)
 
 ## docs/API_CONTRACT.md (new, temporary)

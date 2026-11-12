@@ -1,4 +1,4 @@
-.PHONY: setup seed samples samples-fe check-samples dev dev-backend dev-frontend test test-backend test-frontend lint check gen-api check-contract clean help
+.PHONY: setup seed samples samples-fe check-samples dev dev-backend dev-frontend test test-backend test-frontend lint check gen-api check-contract clean-db clean help
 
 PYTHON ?= python3.11
 VENV := backend/.venv
@@ -18,6 +18,7 @@ help:
 	@echo "  check           lint + check-samples + test (CI-equivalent sweep)"
 	@echo "  gen-api         regen frontend/openapi.json + src/api/schema.gen.ts (Phase 6)"
 	@echo "  check-contract  fail if generated contract files are stale (Phase 6)"
+	@echo "  clean-db        delete backend/data/app.db (run after schema changes)"
 	@echo "  clean           remove venv, node_modules, caches"
 
 setup: $(VENV)/bin/python frontend/node_modules
@@ -92,6 +93,15 @@ gen-api:
 
 check-contract:
 	@echo "check-contract: not yet implemented (Phase 6)."
+
+# Delete the runtime run DB so the next backend start rebuilds
+# it from the current schema.sql. Needed any time a CHECK
+# constraint or table shape changes — `CREATE IF NOT EXISTS`
+# won't retrofit an existing file. The seeded catalog.db is
+# left alone; rerun `make seed` if you also want to rebuild it.
+clean-db:
+	rm -f backend/data/app.db backend/data/app.db-shm backend/data/app.db-wal
+	@echo "clean-db: removed backend/data/app.db (+ WAL sidecars if any)."
 
 clean:
 	rm -rf $(VENV) frontend/node_modules frontend/dist \

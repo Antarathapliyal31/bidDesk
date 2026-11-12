@@ -101,12 +101,15 @@ def _retry_reason(exc: BaseException) -> str:
 class ScriptedResponse:
     """One scripted LLM response.
 
-    `content` is the model output as a plain dict (what the caller
-    would otherwise deserialize from the SDK). `tokens_in` /
-    `tokens_out` feed `Budget.charge`.
+    `content` is either a plain dict (single-turn forced-tool
+    shape — what the analyst uses) OR a list of block-like objects
+    (`type` / `name` / `input` / `id` / `text`) mimicking the
+    Anthropic SDK's `response.content` list. The pricing tool loop
+    uses the list shape to feed scripted tool_use blocks across
+    multiple turns. `tokens_in` / `tokens_out` feed `Budget.charge`.
     """
 
-    content: dict[str, Any]
+    content: dict[str, Any] | list[Any]
     tokens_in: int = 0
     tokens_out: int = 0
 
@@ -231,21 +234,33 @@ class AnthropicLLM:
         max_tokens: int = 4096,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
+        system: str | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> Any:
         """One LLM call, wrapped with `with_retry`. Returns the raw
-        SDK response so callers can walk `content` blocks."""
+        SDK response so callers can walk `content` blocks.
+
+        Pass `messages=` for a multi-turn tool loop (pricing agent).
+        Pass bare `prompt` for the single-user-turn analyst shape.
+        Explicit either/or — callers that use `messages` MUST pass
+        the bus/run_id so retries emit on the right run.
+        """
 
         _policy = policy or RetryPolicy()
+        _messages = messages or [{"role": "user", "content": prompt}]
 
         async def _once() -> Any:
             client = self._ensure_client()
-            return await client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-                tools=tools or [],
-                tool_choice=tool_choice or {"type": "auto"},
-            )
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "messages": _messages,
+                "tools": tools or [],
+                "tool_choice": tool_choice or {"type": "auto"},
+            }
+            if system is not None:
+                kwargs["system"] = system
+            return await client.messages.create(**kwargs)
 
         response = await with_retry(
             _once,

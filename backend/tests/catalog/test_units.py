@@ -295,20 +295,24 @@ class TestConversionFunctions:
 
 
 class TestRegistry:
-    def test_four_functions_registered(self) -> None:
-        # SPEC §8.1 names four conversion functions; we register exactly four.
+    def test_registered_functions(self) -> None:
+        # Phase 4 added `pieces_to_boxes` for the fastener case.
         assert set(UNIT_CONVERSIONS.keys()) == {
             "length_to_pieces",
             "area_to_coverage_units",
             "squares_to_bundles",
             "board_feet_to_pieces",
+            "pieces_to_boxes",
         }
 
     def test_registered_match_module(self) -> None:
+        from app.catalog.units import pieces_to_boxes
+
         assert UNIT_CONVERSIONS["length_to_pieces"] is length_to_pieces
         assert UNIT_CONVERSIONS["area_to_coverage_units"] is area_to_coverage_units
         assert UNIT_CONVERSIONS["squares_to_bundles"] is squares_to_bundles
         assert UNIT_CONVERSIONS["board_feet_to_pieces"] is board_feet_to_pieces
+        assert UNIT_CONVERSIONS["pieces_to_boxes"] is pieces_to_boxes
 
     def test_our_table_only_uses_defined_enum(self) -> None:
         for v in OUR_TABLE.values():
@@ -367,6 +371,14 @@ def _dims() -> list[Dimension]:
             units={"BF": 1, "MBF": 1000},
             sale_units={
                 "EA": SaleUnitSpec("board_feet_to_pieces", ("nominal_size", "length_ft")),
+            },
+        ),
+        Dimension(
+            name="count",
+            base_unit="EA",
+            units={"EA": 1},
+            sale_units={
+                "BOX": SaleUnitSpec("pieces_to_boxes", ("pack_qty",)),
             },
         ),
     ]
@@ -476,6 +488,37 @@ class TestConvertDimensionPath:
         )
         assert r.sale_qty == 125
         assert r.conversion_path == "2 MBF → 2000 BF → 125 EA (2x6x16 = 16 BF/piece)"
+
+    def test_count_ea_to_box_via_pack_qty(self) -> None:
+        """500 nails + pack_qty=100 → 5 BOX. Needed so fasteners
+        requested in individual pieces price into boxes."""
+
+        r = convert_item_to_sale_qty(
+            item_qty=Decimal("500"),
+            item_unit=Unit.EA,
+            unit_raw="pcs",
+            pint_convertible=False,
+            product={"sale_unit": "BOX", "pack_qty": 100},
+            dimensions=_dims(),
+        )
+        assert r.sale_qty == 5
+        assert r.note is None
+        # Conversion path mentions the pack_qty so an estimator
+        # can see where the number came from.
+        assert "pack_qty = 100" in (r.conversion_path or "")
+
+    def test_count_ea_to_box_ceiling(self) -> None:
+        """501 nails + pack_qty=100 → 6 BOX (ceil)."""
+
+        r = convert_item_to_sale_qty(
+            item_qty=Decimal("501"),
+            item_unit=Unit.EA,
+            unit_raw="pcs",
+            pint_convertible=False,
+            product={"sale_unit": "BOX", "pack_qty": 100},
+            dimensions=_dims(),
+        )
+        assert r.sale_qty == 6
 
 
 class TestConvertPintFallback:

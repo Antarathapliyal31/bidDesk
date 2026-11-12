@@ -128,7 +128,16 @@ class ItemKind(StrEnum):
 class MatchStatus(StrEnum):
     matched = "matched"
     substitute = "substitute"
+    # `no_match`: the agent searched and the catalog has nothing
+    # suitable (e.g. cedar shakes in a seed that doesn't carry
+    # cedar). Reserved for "nothing fits" — never used for
+    # ambiguity. Compare with `needs_review`.
     no_match = "no_match"
+    # `needs_review`: the agent returned sku=None BUT its catalog
+    # query DID return candidates that matched the item's
+    # requirements. The code promotes sku=None → needs_review so
+    # the estimator sees it's an open decision, not a no-go.
+    needs_review = "needs_review"
     failed = "failed"
     timeout = "timeout"
     skipped = "skipped"

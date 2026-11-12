@@ -51,3 +51,18 @@ dimensions:
         function: board_feet_to_pieces
         uses_fields: [nominal_size, length_ft]
     rounding: ceil
+
+  # Count-group pack conversion. Covers the fastener case:
+  # the item is stated in individual nails (EA) but the SKU
+  # sells by BOX with pack_qty = nails-per-box. "2 boxes" ends up
+  # as identity (BOX → BOX) in `convert_item_to_sale_qty` step 1,
+  # so we don't need a BOX->BOX entry here.
+  count:
+    base_unit: EA
+    units:
+      EA: 1
+    sale_units:
+      BOX:
+        function: pieces_to_boxes
+        uses_fields: [pack_qty]
+    rounding: ceil

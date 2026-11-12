@@ -24,3 +24,13 @@ make dev        # backend on :8000, frontend on :5173 (proxies /api -> :8000)
 ```
 
 Catalog prices in the seeded DB are **synthetic**. No real brand names are used.
+
+### After pulling a schema change
+
+The runtime run DB (`backend/data/app.db`) is created with `CREATE TABLE IF NOT EXISTS`, which does **not** retrofit new CHECK constraints onto an existing file. If a pull adds a status value or a new CHECK clause (see git log for touches to `backend/app/db/schema.sql`), delete the run DB so it rebuilds from the current schema:
+
+```bash
+make clean-db
+```
+
+The seeded catalog (`backend/data/catalog.db`) is unaffected — rebuild that with `make seed` only when `app/catalog/seed.py` or `app/catalog/schema.sql` changes.

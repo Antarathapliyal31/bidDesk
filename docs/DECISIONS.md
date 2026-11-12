@@ -561,6 +561,165 @@ The same pattern applies to Phase 4's Pricing Agent: ONE tool
 (`submit_matches`), `tool_choice: auto`, validation-retry on a
 missing `tool_use` block.
 
+## 22. Pricing: per-item partial batches (not whole-batch failure) — 2026-11-11
+
+Decision: A pricing batch where only some items fail code
+guardrails returns `PricingResult.status='partial'` with an
+`ItemError(ref=item_id, kind, message)` per dropped item; the
+other items are priced normally.
+
+Triggers that produce an `ItemError` (and keep the batch going):
+  - `candidate_set` — submitted SKU wasn't returned by any
+    `query_catalog` call for that item (this covers invented
+    SKUs — they're never in the candidate set, so they never
+    touch the catalog lookup).
+  - `hallucinated_sku` — the SKU WAS in the candidate set (the
+    model saw it) but has since vanished from the catalog
+    (deactivation race). Edge case but handled identically.
+  - `max_steps_exceeded` — the tool loop capped out before
+    submitting a match for that item.
+  - `missing_proposal` — model submitted `submit_matches` without
+    an entry for that item.
+
+The candidate-set check runs BEFORE the catalog-existence check
+so an invented SKU always ends as `candidate_set` with
+status=`failed`, never as `no_match`. `no_match` is reserved for
+"the agent searched and genuinely found nothing suitable"
+(submitted `sku=None`).
+
+Retry contract: on the FIRST attempt a candidate-set violation
+raises `CandidateSetViolation` → delegate retries with
+`ValidationFeedback`. On the retry pass, verify soft-fails the
+offending item instead of raising so the rest of the batch keeps
+its priced lines.
+
+Because: a single bad SKU would otherwise doom the whole batch
+even when 7 of 8 items are perfectly matchable — that's a worse
+estimator experience than showing "7 priced, 1 flagged for
+review." It also stays truthful: the failed item carries the
+exact reason, batch status is partial, `no_match` keeps its
+precise meaning.
+
+Trade-off: slightly more surface (`PricingResult.status` +
+`item_errors`) but the handler logic stays local to
+`agents/pricing/agent.py::_build_item_errors`. The orchestrator
+(Phase 5) sees a stable envelope either way.
+
+## 23. Count-group `count` dimension + `pieces_to_boxes` — 2026-11-11
+
+Decision: Added a fourth dimension to
+`app/catalog/semantic/conversions.yaml`:
+
+```yaml
+count:
+  base_unit: EA
+  units: { EA: 1 }
+  sale_units:
+    BOX: { function: pieces_to_boxes, uses_fields: [pack_qty] }
+  rounding: ceil
+```
+
+With a matching `pieces_to_boxes(base_qty_ea, pack_qty)`
+registered in `UNIT_CONVERSIONS`. Also added `bx` → `BOX` to
+the unit-normalization table.
+
+Because: SPEC §8.1 treats BOX, BDL, ROLL, BAG, LB, GAL, HR as
+the "count group" that's identity-only when the item unit equals
+the sale unit. That handles "2 boxes of nails" (item=BOX,
+sku.sale_unit=BOX → 2 BOX). It does NOT handle "500 nails"
+(item=EA, sku.sale_unit=BOX, pack_qty=500 → 1 BOX) — that's a
+real estimator shape (an RFP that lists 500 individual nails)
+and without a pack_qty dimension the line falls to
+`unit_conversion_unavailable`.
+
+Trade-off: EA now appears as a `unit` in `count` AND as a
+`sale_unit` in `length`/`board_measure`. The dimension selection
+algo keeps them separate: it matches on
+`item.unit ∈ dim.units AND product.sale_unit ∈ dim.sale_units`,
+so a stud (sale_unit=EA, length_ft=8) never picks the count
+dimension for an "40 ea" item — identity passthrough catches it
+in step 1 first. Verified by `TestConvertDimensionPath`.
+
+## 24. Pricing: decisions move from prompt to code + schema — 2026-11-12
+
+Decision: Three decision points that previously lived in the
+pricing system prompt are now code + schema, not prose rules.
+
+**1. Least-waste stock length picker** (code, SPEC §8.3 refinement).
+When an item comes in a linear unit (LF, ft, yd — anything that
+normalizes to LF) and the description doesn't fix a per-piece
+length, the MODEL picks the product family (species / grade /
+treatment / nominal_size); the CODE picks the stock length
+using least waste. See `app/agents/pricing/length_picker.py`:
+for each candidate in the submitted SKU's family compute
+`pieces = ceil(total_ft / length_ft)` and
+`waste = pieces * length_ft - total_ft`, then pick minimum
+waste; ties go to the shorter length.
+  - Example (sill plates): 12 LF → `LUM-2X6-12-SYP-2-PTAG`
+    (1 piece, zero waste); the 8-ft board would be 2 × 8 = 4 ft
+    waste, and 10/14/16/18-ft boards all waste more.
+  - Example (fascia 12 yd → 36 LF, trim stocked at 8/10 only):
+    8 ft → 5 × 8 = 40, waste 4; 10 ft → 4 × 10 = 40, waste 4;
+    tie → shorter → `TRM-1X6-8-SPF-2` (5 pieces).
+  - Per-piece lengths in the description (e.g. `"2x6 x 16'"`)
+    still win: the model filters by `length_ft=16` and only
+    that stock comes back; picker trivially selects it.
+Why "ties → shorter": fewer long off-cuts in the yard when
+there's no waste advantage either way. Documented + tested in
+`tests/agents/pricing/test_length_picker.py::TestTieBreakShorter`.
+Why code instead of prompt: the decision needs to be auditable
+and deterministic — same input always yields the same length —
+so ties and `samples/expected/rfp_messy.json` can be asserted
+line-for-line rather than depending on model prose.
+
+**2. `needs_review` status for "catalog had options but agent
+didn't pick"** (code). `MatchStatus` grew a new value:
+`needs_review`. When the model returns `sku=None` but at least
+one `query_catalog` call for that item returned candidates,
+code promotes the status from `no_match` to `needs_review` with
+`verify_notes=['candidates_available']`. `no_match` is now
+reserved for "the agent searched and the catalog has nothing
+suitable at all" (e.g. cedar shakes in a seed with no cedar).
+This prevents an ambiguous description from being reported as
+"we don't carry that" when in fact several candidates were
+returned — the estimator sees a question, not a dead end.
+Cross-layer: `MatchStatus` enum + Pydantic Literal on
+`PricingLineResult.status` + `price_results_status_ck` CHECK
+constraint in `app/db/schema.sql` + `BidLine` invariant message.
+
+**3. `ambiguous` flag on `MatchProposal`** (schema). The
+submit_matches tool schema now carries
+`ambiguous: {is_ambiguous: bool, reason: str} | null`.
+Distinct from `assumptions` (which fills unstated specs):
+`ambiguous=true` means the *stated* description resolves to
+multiple valid catalog variants and the model made the call —
+e.g. "5/8 drywall for ceilings" that could be regular or
+Type X; "2x6 PT" that could be PTAG or PTGC. Code accepts the
+pick (price is right either way), records verify_note
+`ambiguous_pick`, forces confidence to medium with a reason,
+and the bid-assembly layer routes it to review. Keeps the SKU
++ sale_qty + stock populated so the estimator can accept the
+pick in one click if it's correct.
+
+Combined effect: the system prompt simplifies to "query once
+per item with item_id, pick the best candidate, record
+assumptions / ambiguity" — everything else is deterministic
+code. Prompt file: `app/agents/pricing/prompts.py`.
+
+## 25. Least-waste tie-break: ties go to the shorter length — 2026-11-12
+
+Decision: When two stock lengths tie on waste, pick the shorter.
+
+Reasoning: Fewer long off-cuts in the yard when there's no
+waste advantage either way; a 36 LF fascia run that ties on
+5 × 8 ft vs 4 × 10 ft takes the 8-ft order. Any deterministic
+tie-break will do; "shorter" is the cheapest policy to defend
+("we didn't buy 10-ft boards you didn't need").
+
+The rule is tested in `test_length_picker.py::TestTieBreakShorter`
+and surfaces in `samples/expected/rfp_messy.json` for line 17
+(`TRM-1X6-8-SPF-2`, 5 × 8 ft, waste 4 ft).
+
 ---
 
 ## Frontend entries (F1–F5)
@@ -658,6 +817,30 @@ Because: shadcn primitives (dialog, dropdown, popover, tooltip) emit
 it, open/close transitions snap instead of easing.
 Trade-off: This is the single acceptable addition to tokens.css
 mentioned in F3. Documented in that entry's overwrite guard.
+
+## F6. Pending frontend work for Phase 4 (`needs_review` status + badge) — 2026-11-12
+
+Deferred — not applied yet. Phase 4 added `needs_review` to the
+backend `MatchStatus` enum + Pydantic `PricingLineResult.status`
+Literal + `price_results_status_ck` DB constraint. The frontend
+has to follow when the Phase-5 OpenAPI contract lands:
+
+  - `frontend/src/api/schema.gen.ts` will pick up the new enum
+    value when `make gen-api` regenerates from backend OpenAPI.
+    `frontend/openapi.json` + `schema.gen.ts` must be committed
+    together.
+  - `src/lib/runReducer.ts` (if it touches match-status) needs
+    to handle `needs_review` on `item.priced` events.
+  - UI badge: neutral/amber variant with the text label
+    "Needs review". The existing BidLine status badge
+    (Phase 8) should treat it like `open_flag` — the line
+    shows up in the review queue but is NOT priced, so no
+    `extended_cents` row. Keep the label explicit, no icon-only.
+
+Why deferred: no OpenAPI gen path exists yet (Phase 6), so
+there's nothing to regenerate from. This note is the Phase-4
+breadcrumb; the actual frontend edits land in Phase 8's bid
+workspace work.
 
 ---
 

@@ -372,8 +372,8 @@ class BidLine(Contract):
             raise ValueError(
                 f"BidLine[{self.line_id!r}]: match.status="
                 f"{self.match.status.value!r} requires unit_price_cents "
-                f"(no-price lines must use status 'no_match', 'failed', "
-                f"'timeout', or 'skipped')"
+                f"(no-price lines must use status 'no_match', "
+                f"'needs_review', 'failed', 'timeout', or 'skipped')"
             )
         return self
 
