@@ -522,6 +522,45 @@ part of whatever work lands the real batching.
   - Trace: one `span.extraction.batch` per batch, parent is the
     `delegate.document_analyst` span. The timeline shows the fan-out.
 
+## 21. Forced `tool_choice` unsupported on 5.x models — 2026-11-11
+Decision: `extract_items()` (and any future forced-tool call —
+Phase 4's Pricing Agent included) sets
+`tool_choice={"type": "auto"}` and offers EXACTLY ONE tool
+(`report_extraction` / `submit_matches`). If the model returns
+no `tool_use` block — SPEC §6.3's "forced" guarantee is now a
+best-effort — `_extract_tool_input` raises `ExtractionShapeError`
+→ the agent handler converts to Pydantic `ValidationError` →
+`delegate()` fires a validation retry with
+`ValidationFeedback` so the second attempt sees the shape
+problem spelled out.
+Because: Real-API smoke on 2026-11-11 against
+`claude-sonnet-5-5` returned
+`BadRequestError: tool_choice: type "tool" and "any" are not
+supported for this model`. The forced-tool pattern SPEC §6.3
+assumed is unavailable on Claude 5.x. Three guards make `auto`
+almost-as-safe:
+  1. ONE tool offered at a time — the model has nowhere else to
+     go when told "call the tool".
+  2. The system prompt ends "Call `report_extraction` exactly
+     once at the end." — strongly worded, model-tested.
+  3. Validation-retry at the delegate layer catches the tiny
+     tail where the model writes prose instead of calling the
+     tool.
+Alternatives considered: Fall back to a model that supports
+forced `tool_choice` (Opus 4.x works but is slower and more
+expensive); JSON-mode prompting without tool use (lose the
+schema enforcement); fail-fast on `BadRequestError` (loses the
+demo entirely on 5.x models).
+Trade-off / known downside: One extra model turn in the tail
+case where the model forgets to call the tool. Measured on the
+smoke run: both samples called the tool on the first attempt,
+so the tail is empirically rare. Encoded in
+`app/agents/analyst/extraction.py` (`_extract_tool_input`) and
+`app/agents/analyst/agent.py` (`_shape_error_to_validation_error`).
+The same pattern applies to Phase 4's Pricing Agent: ONE tool
+(`submit_matches`), `tool_choice: auto`, validation-retry on a
+missing `tool_use` block.
+
 ---
 
 ## Frontend entries (F1–F5)

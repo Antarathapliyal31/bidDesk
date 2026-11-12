@@ -80,6 +80,39 @@ async def insert_run(
         )
 
 
+async def _add_run_tokens(
+    conn: aiosqlite.Connection,
+    *,
+    run_id: str,
+    tokens_in: int,
+    tokens_out: int,
+) -> None:
+    await conn.execute(
+        """
+        UPDATE runs
+        SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?
+        WHERE id = ?
+        """,
+        (tokens_in, tokens_out, run_id),
+    )
+
+
+async def add_run_tokens(
+    db: Database,
+    *,
+    run_id: str,
+    tokens_in: int,
+    tokens_out: int,
+) -> None:
+    """Accumulate token usage onto `runs.tokens_in` / `.tokens_out`.
+    Called from `AnthropicLLM.call()` after every successful SDK
+    response; the running total is what the trace / history page
+    shows."""
+
+    async with db.write() as conn:
+        await _add_run_tokens(conn, run_id=run_id, tokens_in=tokens_in, tokens_out=tokens_out)
+
+
 async def get_run_status(db: Database, run_id: str) -> str | None:
     """Read `runs.status`. Uses the read connection."""
 

@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import require_anthropic_key
+from app.db import repo as _repo
+from app.db.init import Database
 from app.runtime.budgets import Budget
 from app.runtime.events import EventBus
 from app.runtime.retry import RetryPolicy, with_retry
@@ -161,6 +163,25 @@ class FakeLLM:
 # ---------------------------------------------------------------------------
 
 
+def _usage_tokens(response: Any) -> tuple[int, int]:
+    """Pull `(input_tokens, output_tokens)` off an SDK response.
+
+    Resilient to both the real SDK's `response.usage.input_tokens`
+    shape and a plain-dict `response.usage = {...}` used in tests.
+    Zero when usage is missing so callers can charge unconditionally.
+    """
+
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0, 0
+    tokens_in = getattr(usage, "input_tokens", None)
+    tokens_out = getattr(usage, "output_tokens", None)
+    if tokens_in is None and isinstance(usage, dict):
+        tokens_in = usage.get("input_tokens")
+        tokens_out = usage.get("output_tokens")
+    return int(tokens_in or 0), int(tokens_out or 0)
+
+
 class AnthropicLLM:
     """Thin wrapper around `anthropic.AsyncAnthropic(max_retries=0)`.
 
@@ -170,17 +191,22 @@ class AnthropicLLM:
     connection); validation and other 4xx propagate immediately so
     `delegate` can handle them with structured feedback.
 
-    The method signature here is a placeholder — Phase 3's real
-    extraction call wires the forced-tool shape in
-    `agents/analyst/extraction.py`. We keep `call()` generic so the
-    orchestrator's own tool loop (Phase 3 step 5) can reuse it.
+    Charges response usage after every successful call:
+      - `budget.charge(tokens_in, tokens_out, turns=0)` — fast
+        in-memory accounting so the budget can STOP a run
+        mid-flight when the cap is hit (BudgetExhausted).
+      - `repo.add_run_tokens(db, run_id, ...)` — persisted to
+        `runs.tokens_in` / `.tokens_out` for the history / trace.
+      - Only charges after a successful response; failures (incl.
+        retried-then-failed) don't accumulate.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, db: Database | None = None) -> None:
         self._api_key = require_anthropic_key()
         # The real client is constructed lazily so test runs that
         # never hit AnthropicLLM don't need the SDK import.
         self._client: Any | None = None
+        self._db = db
 
     def _ensure_client(self) -> Any:
         if self._client is None:
@@ -206,13 +232,8 @@ class AnthropicLLM:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
     ) -> Any:
-        """One LLM call, wrapped with `with_retry`.
-
-        Phase 3 step 2+ passes `tools=[{...}]` and
-        `tool_choice={"type": "tool", "name": "..."}` for forced
-        structured output. The response is returned as-is from the
-        SDK so callers can walk `content` blocks.
-        """
+        """One LLM call, wrapped with `with_retry`. Returns the raw
+        SDK response so callers can walk `content` blocks."""
 
         _policy = policy or RetryPolicy()
 
@@ -226,7 +247,7 @@ class AnthropicLLM:
                 tool_choice=tool_choice or {"type": "auto"},
             )
 
-        return await with_retry(
+        response = await with_retry(
             _once,
             policy=_policy,
             bus=bus,
@@ -235,3 +256,20 @@ class AnthropicLLM:
             reason_of=_retry_reason,
             budget=budget,
         )
+
+        # Charge usage AFTER the call returns successfully. The
+        # Budget call may raise BudgetExhausted — propagate, since
+        # exceeding the budget stops the run.
+        tokens_in, tokens_out = _usage_tokens(response)
+        if tokens_in or tokens_out:
+            if self._db is not None:
+                await _repo.add_run_tokens(
+                    self._db,
+                    run_id=run_id,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                )
+            if budget is not None:
+                # turns=0 so turn counting stays with the orchestrator.
+                budget.charge(tokens_in=tokens_in, tokens_out=tokens_out, turns=0)
+        return response

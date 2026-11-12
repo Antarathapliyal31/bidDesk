@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, ValidationError
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from app.agents.analyst.extraction import (
     ExtractionInput,
@@ -28,6 +29,26 @@ from app.agents.analyst.verify import verify_items
 from app.contracts import AgentName, Contract, ItemView
 from app.runtime.delegate import AgentContext, AgentSpec, register_agent
 from app.runtime.spotlight import new_run_tag
+
+
+def _shape_error_to_validation_error(exc: ExtractionShapeError) -> ValidationError:
+    """Convert an `ExtractionShapeError` (model didn't call the
+    forced tool, or tool payload failed Pydantic) into a Pydantic
+    `ValidationError` so `delegate()`'s retry path fires with
+    `ValidationFeedback`. The feedback carries the shape message
+    verbatim — the model gets told exactly what to fix."""
+
+    return ValidationError.from_exception_data(
+        title="report_extraction",
+        line_errors=[
+            InitErrorDetails(
+                type=PydanticCustomError("extraction_shape", str(exc)),
+                loc=("response",),
+                input=None,
+            )
+        ],
+    )
+
 
 # ---------------------------------------------------------------------------
 # Analyst request / result contracts (orchestrator → analyst)
@@ -98,11 +119,12 @@ class _AnalystHandler:
                 bus=ctx.bus,
             )
         except ExtractionShapeError as exc:
-            # Let `delegate` convert this to a validation retry.
-            # Delegate expects a ValidationError or malformed dict;
-            # by returning a well-formed-but-empty payload we'd hide
-            # the shape bug. Re-raise so delegate can feed it back.
-            raise exc
+            # Convert to Pydantic ValidationError so delegate's
+            # validation-retry path fires with ValidationFeedback
+            # instead of returning `status="failed"` on the first
+            # malformed call. The feedback carries the reason
+            # (e.g. "no report_extraction tool_use block").
+            raise _shape_error_to_validation_error(exc) from exc
 
         items = verify_items(draft.items, pages=pages)
         unreadable.extend(draft.unreadable_pages)

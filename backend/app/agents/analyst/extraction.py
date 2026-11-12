@@ -149,12 +149,18 @@ async def extract_items(
 
     system, user = build_prompt(input_)
     prompt = f"{system}\n\n{user}"  # FakeLLM just needs one string
+    # `tool_choice={"type":"tool",...}` is unsupported on some
+    # Claude 5.x models (BadRequestError: "tool_choice: type 'tool'
+    # and 'any' are not supported for this model"). We rely on the
+    # system prompt — "Call `report_extraction` exactly once at
+    # the end." — to drive the single tool call. `type: "auto"`
+    # with ONE tool offered works everywhere.
     response = await llm.call(
         prompt,
         bus=bus,
         run_id=input_.run_id,
         tools=[REPORT_EXTRACTION_TOOL],
-        tool_choice={"type": "tool", "name": "report_extraction"},
+        tool_choice={"type": "auto"},
     )
 
     tool_input = _extract_tool_input(response)

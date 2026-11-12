@@ -166,5 +166,133 @@ class TestIsRetryable:
         assert is_retryable(RuntimeError("random")) is False
 
 
+# ---------------------------------------------------------------------------
+# Token charging: AnthropicLLM.call() → Budget + runs.tokens_in/out
+# ---------------------------------------------------------------------------
+
+
+class TestTokenCharging:
+    """We can't call the real Anthropic API in tests; instead we
+    construct AnthropicLLM, inject a fake `_client` whose
+    `messages.create` returns a mock response carrying a `usage`
+    attribute, and watch Budget + runs.tokens_in/out.
+    """
+
+    async def test_usage_charges_budget_and_persists(self, db, bus, monkeypatch) -> None:
+        from app.contracts import InputKind
+        from app.db import repo
+        from app.runtime.budgets import Budget
+        from app.runtime.llm import AnthropicLLM
+
+        # Seed a run so tokens_in / tokens_out have a row to update.
+        await repo.insert_run(
+            db,
+            run_id="run_abc",
+            branch_id="BR-NJ-01",
+            input_kind=InputKind.pdf,
+            input_name="rfp.pdf",
+            created_at="2026-11-11T12:00:00+00:00",
+        )
+        # Set a real key so the constructor passes.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg, "_settings", None)
+
+        llm = AnthropicLLM(db=db)
+
+        class _Usage:
+            input_tokens = 123
+            output_tokens = 45
+
+        class _Resp:
+            usage = _Usage()
+
+            def __init__(self) -> None:
+                self.content: list = []
+
+        class _Messages:
+            async def create(self, **_kwargs):
+                return _Resp()
+
+        class _Client:
+            def __init__(self) -> None:
+                self.messages = _Messages()
+
+        # Inject the fake client so we never hit the SDK.
+        llm._client = _Client()
+
+        budget = Budget(turns=10, tokens=1000, deadline_s=60.0)
+        budget.start()
+
+        await llm.call("hi", bus=bus, run_id="run_abc", budget=budget)
+
+        # In-memory budget was charged.
+        assert budget.snapshot()["tokens"] == 123 + 45
+        # DB row was updated.
+        cursor = await db.read_conn.execute(
+            "SELECT tokens_in, tokens_out FROM runs WHERE id = 'run_abc'"
+        )
+        try:
+            row = await cursor.fetchone()
+        finally:
+            await cursor.close()
+        assert row is not None
+        assert row[0] == 123
+        assert row[1] == 45
+
+    async def test_token_limit_stops_the_run(self, db, bus, monkeypatch) -> None:
+        """Budget with 100-token limit; a call that reports 200
+        tokens must raise BudgetExhausted — the limit is enforced,
+        not advisory."""
+
+        from app.contracts import InputKind
+        from app.db import repo
+        from app.runtime.budgets import Budget, BudgetExhausted
+        from app.runtime.llm import AnthropicLLM
+
+        await repo.insert_run(
+            db,
+            run_id="run_abc",
+            branch_id="BR-NJ-01",
+            input_kind=InputKind.pdf,
+            input_name="rfp.pdf",
+            created_at="2026-11-11T12:00:00+00:00",
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+        import app.config as cfg
+
+        monkeypatch.setattr(cfg, "_settings", None)
+
+        llm = AnthropicLLM(db=db)
+
+        class _Usage:
+            input_tokens = 150
+            output_tokens = 100
+
+        class _Resp:
+            usage = _Usage()
+
+            def __init__(self) -> None:
+                self.content: list = []
+
+        class _Messages:
+            async def create(self, **_kwargs):
+                return _Resp()
+
+        class _Client:
+            def __init__(self) -> None:
+                self.messages = _Messages()
+
+        llm._client = _Client()
+
+        budget = Budget(turns=10, tokens=100, deadline_s=60.0)
+        budget.start()
+
+        with pytest.raises(BudgetExhausted) as exc:
+            await llm.call("hi", bus=bus, run_id="run_abc", budget=budget)
+        assert exc.value.which == "tokens"
+
+
 # Silence the "unused os" warning — kept for future env tweaks.
 _ = os
