@@ -165,16 +165,25 @@ def verify_item(
     read_via = None
     verified = False
     if page is not None:
-        read_via = "text" if page.route in ("text", "text+vision") else "vision"
-        if read_via == "text":
+        # The page's ORIGINAL route decides read_via — not whether
+        # the model happened to quote something that substring-
+        # matches a transcription. A `text+vision` page's
+        # pdfplumber text is unreliable (that's why it was routed
+        # that way), so items there are vision-read too
+        # (DECISIONS #26).
+        if page.route in ("vision", "text+vision"):
+            read_via = "vision"
+            # No byte-match attempted. Item is kept as an
+            # `unverified` open flag for the estimator.
+            notes.append("read_via_vision")
+        else:
+            read_via = "text"
             normalized_page = _normalize_for_match(page.text)
             normalized_quote = _normalize_for_match(draft.source_quote)
             if normalized_quote and normalized_quote in normalized_page:
                 verified = True
             else:
                 notes.append("quote_not_found")
-        # Vision pages can't be text-verified here; downstream
-        # transcription pass would put us back on the text path.
     else:
         notes.append("quote_not_found")
 

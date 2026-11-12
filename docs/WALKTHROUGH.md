@@ -597,15 +597,36 @@ loop lands later.
   whitespace, lowercase. Quote verified iff the normalized quote
   is a substring of the normalized page text; otherwise
   `source.verified=False` + note `quote_not_found` (DECISIONS
-  #17 — kept, not dropped). Quantity-in-quote check (supports
-  "1,200", "3.5", "1 1/2" via a tiny parser). Unit normalization
-  via `catalog.units.normalize_unit`: table hit → silent; pint
-  allowlist only → note `unit_pint_convertible`; miss → note
-  `unknown_unit`. IDs assigned `item_1..n` in document order.
+  #17 — kept, not dropped). Items from pages routed `vision` or
+  `text+vision` skip the byte-match: they're stamped
+  `read_via='vision'`, `verified=False`, with note
+  `read_via_vision` (DECISIONS #26). Quantity-in-quote check
+  (supports "1,200", "3.5", "1 1/2" via a tiny parser). Unit
+  normalization via `catalog.units.normalize_unit`: table hit →
+  silent; pint allowlist only → note `unit_pint_convertible`;
+  miss → note `unknown_unit`. IDs assigned `item_1..n` in
+  document order.
+- `app/agents/analyst/vision.py` — per-vision-page transcription
+  pass (SPEC §6.2.5, DECISIONS #26). Renders each `vision` or
+  `text+vision` page to a 150-DPI PNG via `pypdfium2`, sends it
+  as an image block to Sonnet alongside a spotlight-wrapped page
+  index, and drops the transcription into `PageExtract.text` for
+  the extraction call. Per-page `trace_span`
+  (`analyst.vision_page`), `asyncio.Semaphore(3)` concurrency,
+  `MAX_VISION_PAGES=10` cap (pages beyond go to
+  `unreadable_pages`), empty transcription → unreadable.
 - `app/agents/analyst/agent.py` — `AnalystRequest`,
   `AnalystResult` contracts; `_AnalystHandler` dispatches route →
-  extract → verify. `build_analyst_spec(llm)` returns the
-  `AgentSpec` the orchestrator registers (`register_default_analyst`).
+  transcribe vision pages → extract → verify.
+  `build_analyst_spec(llm)` returns the `AgentSpec` the
+  orchestrator registers (`register_default_analyst`).
+- `scripts/smoke_vision.py` — real-API smoke for the vision
+  path. Reads `ANTHROPIC_API_KEY` from `backend/.env` only
+  (never prints it), runs the analyst against `rfp_scanned.pdf`
+  and `rfp_messy.pdf`, reports description-level recall and
+  checks the `read_via='vision' / verified=False /
+  read_via_vision` invariants. Outside `tests/` so pytest
+  doesn't collect it.
 - `app/agents/orchestrator/{__init__,loop,tools}.py` —
   `run_orchestrator(plan, ctx)` runs the Phase-3 shim:
   `budget.assert_alive()` → `ask_document_analyst(delegate)` →

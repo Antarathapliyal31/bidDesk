@@ -37,6 +37,27 @@ from tests._seeds import seed_run
 _SAMPLES_ROOT = Path(__file__).resolve().parents[3] / "samples"
 
 
+class _VisionTextBlock:
+    """Minimal duck-type for an Anthropic SDK TextBlock; FakeLLM
+    hands this response back when the analyst calls the vision
+    transcription path (Phase 5c)."""
+
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _VisionSdkResponse:
+    def __init__(self, text: str) -> None:
+        self.content = [_VisionTextBlock(text)]
+
+        class _Usage:
+            input_tokens = 100
+            output_tokens = 50
+
+        self.usage = _Usage()
+
+
 def _expected() -> dict[str, Any]:
     return json.loads((_SAMPLES_ROOT / "expected" / "rfp_messy.json").read_text(encoding="utf-8"))
 
@@ -72,7 +93,24 @@ def _fake_llm_from_expected(expected: dict[str, Any]) -> FakeLLM:
         "facts": {"project_name": None, "due_date_text": None, "general_notes": []},
         "unreadable_pages": [],
     }
-    return FakeLLM(responses=[ScriptedResponse(content=payload, tokens_in=2500, tokens_out=1200)])
+    # Phase 5c: rfp_messy page 7 is text+vision, so the analyst
+    # issues one vision-transcription call BEFORE the extraction
+    # call. Script a plausible transcription containing the page-7
+    # items; verify.py will still stamp them read_via='vision',
+    # verified=False (DECISIONS #26).
+    page_7_transcription = _VisionSdkResponse(
+        text=(
+            "Common nails 8d 2 boxes\n"
+            "Deck screws 3 in 3 boxes\n"
+            "Joist hangers 2x8 40 ea south wall deck ledger\n"
+        )
+    )
+    return FakeLLM(
+        responses=[
+            page_7_transcription,
+            ScriptedResponse(content=payload, tokens_in=2500, tokens_out=1200),
+        ]
+    )
 
 
 @pytest_asyncio.fixture
@@ -152,15 +190,32 @@ class TestRfpMessyAnalyst:
                     leaks.append((bad, "quote", item.source.quote or ""))
         assert not leaks, f"must_not_include leaked into items: {leaks!r}"
 
-    async def test_all_items_verify_against_real_page_text(self, ctx: AgentContext) -> None:
-        """Every item the FakeLLM scored as 'found in the document'
-        must pass our code-only quote-verification pass against the
-        real generated PDF."""
+    async def test_all_text_route_items_verify_against_real_page_text(
+        self, ctx: AgentContext
+    ) -> None:
+        """Every item on a TEXT-routed page must pass code-only
+        quote verification against the real generated PDF.
+
+        Items on vision / text+vision pages (rfp_messy page 7) are
+        verified=False by rule (DECISIONS #26, SPEC §6.2.5) — the
+        frontend fixture mirrors this. They're excluded here."""
 
         expected = _expected()
         register_default_analyst(_fake_llm_from_expected(expected))
-        items, _ = await _run_analyst(ctx)
+        items, page_routes = await _run_analyst(ctx)
+        vision_pages = {
+            r["page_no"] for r in page_routes if r["route"] in ("vision", "text+vision")
+        }
         unverified = [
-            (item.id, item.description, item.notes) for item in items if not item.source.verified
+            (item.id, item.description, item.notes)
+            for item in items
+            if item.source.page not in vision_pages and not item.source.verified
         ]
         assert not unverified, f"unverified items from real PDF: {unverified!r}"
+
+        # Every vision-routed item carries the matching note + flags.
+        for item in items:
+            if item.source.page in vision_pages:
+                assert item.source.read_via == "vision"
+                assert item.source.verified is False
+                assert "read_via_vision" in item.notes

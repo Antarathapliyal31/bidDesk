@@ -19,6 +19,12 @@ quote go to `rejected_claims`.
     the pint allowlist.
   - `unit_pint_convertible` — unit normalised via the pint fallback,
     not our table.
+  - `read_via_vision` — the item was extracted from a page routed
+    `vision` or `text+vision`; the quote was not byte-matched to a
+    text layer, so `source.verified` is always False and the line
+    surfaces as `unverified` for estimator review (DECISIONS #26).
+    Distinct from `quote_not_found`: a vision item isn't "quote
+    missing from text" — it's "no trustworthy text to match against".
   - `invalid_spec:<field>` — a specific extracted field failed its
     own validation (e.g. `invalid_spec:length_ft`); `<field>` is a
     lowercase identifier matching `[a-z_][a-z0-9_]*`.
@@ -35,6 +41,7 @@ from .common import Contract, ItemKind, SourceRef
 
 _ITEM_NOTE_RE = re.compile(
     r"^(quote_not_found|quantity_not_in_quote|unknown_unit|unit_pint_convertible"
+    r"|read_via_vision"
     r"|invalid_spec:[a-z_][a-z0-9_]*)$"
 )
 
@@ -44,6 +51,7 @@ def _validate_item_note(v: str) -> str:
         raise ValueError(
             f"unknown ItemNote: {v!r}. Allowed: quote_not_found, "
             "quantity_not_in_quote, unknown_unit, unit_pint_convertible, "
+            "read_via_vision, "
             "or invalid_spec:<field> with <field> matching [a-z_][a-z0-9_]*"
         )
     return v
@@ -69,5 +77,14 @@ class ItemView(Contract):
             raise ValueError(
                 f"ItemView[{self.id!r}]: note 'quote_not_found' is incompatible "
                 f"with source.verified=True"
+            )
+        # 'read_via_vision' is the companion note to a vision read.
+        # SourceRef already forbids verified=True on vision; this
+        # catches the inverse: claiming a vision read on a line
+        # whose source wasn't actually read via vision.
+        if "read_via_vision" in self.notes and self.source.read_via != "vision":
+            raise ValueError(
+                f"ItemView[{self.id!r}]: note 'read_via_vision' requires "
+                f"source.read_via='vision' (got {self.source.read_via!r})"
             )
         return self
