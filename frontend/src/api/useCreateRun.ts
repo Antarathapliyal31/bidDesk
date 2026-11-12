@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { withDelay } from "@/dev-fixtures";
 
 import type { ApiError } from "./ApiError";
-import { apiFetch, USE_FIXTURES } from "./client";
+import { apiFetch, isFixtureMode } from "./client";
 import type { FaultKey } from "./useFaults";
 
 /**
@@ -66,7 +66,7 @@ export function useCreateRun() {
   return useMutation<CreateRunResult, ApiError, CreateRunPayload>({
     mutationFn: async (payload) => {
       const body = toCreateRunFormData(payload);
-      if (USE_FIXTURES) {
+      if (isFixtureMode()) {
         // Scripted path — every submit lands on the rfp_messy
         // stream (see dev-fixtures/sse/index.ts).
         return withDelay({ run_id: "run_demo_messy" }, 800);

@@ -20,6 +20,9 @@ export type {
   PricedLineView,
   RunEvent,
   RunEventType,
+} from "./events";
+export { RUN_EVENT_TYPES } from "./events";
+export type {
   SourceRef,
   TransferOption,
 } from "./events";

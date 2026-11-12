@@ -5,7 +5,7 @@ import { FIXTURE_RUNS, type FxRunSummary, withDelay } from "@/dev-fixtures";
 import type { RunViewState } from "@/lib/runReducer";
 
 import type { ApiError } from "./ApiError";
-import { apiFetch, USE_FIXTURES } from "./client";
+import { apiFetch, isFixtureMode } from "./client";
 
 /**
  * Run-level metadata that ISN'T in the SSE event stream — project
@@ -113,7 +113,7 @@ export function useRunSummary(runId: string, options: UseRunSummaryOptions = {})
   return useQuery<RunSummary | null, ApiError>({
     queryKey: ["run", runId, "summary"],
     queryFn: async () => {
-      if (USE_FIXTURES) {
+      if (isFixtureMode()) {
         const match = FIXTURE_RUNS.find((r) => r.id === runId) ?? null;
         return withDelay<RunSummary | null>(match, 50);
       }

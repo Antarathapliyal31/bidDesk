@@ -38,7 +38,7 @@ import {
 import type { ApiError } from "./ApiError";
 import { isApiError } from "./ApiError";
 import type { Bid, EditOp, RepriceProposal } from "./bid";
-import { apiFetch, USE_FIXTURES } from "./client";
+import { apiFetch, isFixtureMode } from "./client";
 
 const AUTOSAVE_MS = 800;
 const PATCH_LATENCY_MS = 400;
@@ -94,7 +94,7 @@ export function useBidDraft(runId: string): UseBidDraftResult {
   const query = useQuery<FixtureBidEnvelope | null, ApiError>({
     queryKey: ["bid", runId],
     queryFn: async () => {
-      if (USE_FIXTURES) return withDelay(getFixtureBid(runId), 150);
+      if (isFixtureMode()) return withDelay(getFixtureBid(runId), 150);
       const res = await apiFetch(`/api/runs/${runId}`);
       const detail = (await res.json()) as { bid: Bid | null; agent_bid: Bid | null };
       if (!detail.bid || !detail.agent_bid) return null;
@@ -131,7 +131,7 @@ export function useBidDraft(runId: string): UseBidDraftResult {
     dispatch({ type: "saveStarted" });
     try {
       let serverBid: Bid;
-      if (USE_FIXTURES) {
+      if (isFixtureMode()) {
         serverBid = await withDelay(applier(current.serverDraft, opsToSave), PATCH_LATENCY_MS);
       } else {
         const res = await apiFetch(`/api/runs/${runId}/bid`, {
@@ -212,7 +212,7 @@ export function useBidDraft(runId: string): UseBidDraftResult {
     const current = stateRef.current;
     if (!current.serverDraft || !current.agentBid) return null;
     let finalized: Bid;
-    if (USE_FIXTURES) {
+    if (isFixtureMode()) {
       finalized = await withDelay(fixtureFinalize(current.serverDraft), 200);
     } else {
       const res = await apiFetch(`/api/runs/${runId}/bid/finalize`, {

@@ -194,3 +194,40 @@ export type RunEvent =
     });
 
 export type RunEventType = RunEvent["type"];
+
+/**
+ * Every event-type string the backend may emit on `/stream`.
+ * Enumerated so `useRunStream` can `addEventListener` per name —
+ * the backend sends NAMED SSE frames (`event: run.started`, etc.)
+ * and `EventSource.onmessage` only fires for the unnamed default
+ * event. One shared handler dispatches each parsed frame into
+ * the reducer. Keep this list in sync with the `RunEvent` union
+ * above (compile-time check in `satisfiesAll` below).
+ */
+export const RUN_EVENT_TYPES: readonly RunEventType[] = [
+  "run.started",
+  "run.status",
+  "span.started",
+  "span.finished",
+  "span.failed",
+  "agent.activity",
+  "tool.called",
+  "tool.result",
+  "retry.scheduled",
+  "validation.failed",
+  "page.routed",
+  "item.extracted",
+  "item.flagged",
+  "item.priced",
+  "conflict.flagged",
+  "budget.exhausted",
+  "bid.ready",
+  "run.finished",
+] as const;
+
+// Compile-time proof the list above covers every RunEventType.
+// If a new case joins the union without a matching entry here,
+// `_Missing` resolves to that case name and the assignment fails.
+type _Missing = Exclude<RunEventType, (typeof RUN_EVENT_TYPES)[number]>;
+const _RUN_EVENT_TYPES_EXHAUSTIVE: _Missing extends never ? true : _Missing = true;
+void _RUN_EVENT_TYPES_EXHAUSTIVE;

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { FIXTURE_FAULTS, type FxFault, type FxFaultKey, withDelay } from "@/dev-fixtures";
 
-import { apiFetch, USE_FIXTURES } from "./client";
+import { apiFetch, isFixtureMode } from "./client";
 
 /**
  * Demo fault list + enable flag. Real path reads `GET /api/meta`
@@ -19,7 +19,7 @@ export function useFaults() {
   return useQuery<FaultsMeta>({
     queryKey: ["faults"],
     queryFn: async () => {
-      if (USE_FIXTURES) return withDelay({ enabled: true, faults: FIXTURE_FAULTS });
+      if (isFixtureMode()) return withDelay({ enabled: true, faults: FIXTURE_FAULTS });
       const res = await apiFetch("/api/meta");
       const meta = (await res.json()) as MetaResponse;
       return { enabled: meta.demo_faults_enabled, faults: meta.faults };

@@ -8,7 +8,7 @@
  * PDFs under `/samples/` by input filename so the Playwright e2e
  * + manual demo keep working.
  */
-import { USE_FIXTURES } from "@/api/client";
+import { isFixtureMode } from "@/api/client";
 
 const SAMPLE_PDFS: Readonly<Record<string, string>> = {
   "rfp_clean.pdf": "/samples/rfp_clean.pdf",
@@ -21,7 +21,7 @@ export function pdfUrlForRun(runId: string, inputName: string | null): string | 
   const lower = inputName.toLowerCase();
   if (!lower.endsWith(".pdf")) return null;
 
-  if (USE_FIXTURES) {
+  if (isFixtureMode()) {
     if (!runId.startsWith("run_demo_")) return null;
     return SAMPLE_PDFS[lower] ?? null;
   }

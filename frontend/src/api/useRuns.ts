@@ -11,7 +11,7 @@ import {
 } from "@/dev-fixtures";
 
 import type { ApiError } from "./ApiError";
-import { apiFetch, USE_FIXTURES } from "./client";
+import { apiFetch, isFixtureMode } from "./client";
 
 /**
  * Run list for the History page. Paginated via `next_cursor`.
@@ -82,7 +82,7 @@ export function useRuns(params: UseRunsParams = {}) {
   return useInfiniteQuery<RunsPage, ApiError, InfData, [string, typeof key], string | undefined>({
     queryKey: ["runs", key],
     queryFn: ({ pageParam }) =>
-      USE_FIXTURES
+      isFixtureMode()
         ? withDelay(pageFromFixtures(params.status, pageParam))
         : fetchRunsPage(params.status, pageParam),
     initialPageParam: undefined,
