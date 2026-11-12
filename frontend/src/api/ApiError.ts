@@ -16,6 +16,13 @@
  * one 500-shaped error state — the backend's `internal_error` body
  * is captured in `details.raw_code` for logs.
  */
+// SPEC §13 / Phase 8 review: `internal_error` is the backend code
+// on HTTP 500 for unexpected exceptions. The frontend surfaces it
+// when the envelope is well-formed; a bare 500 (HTML page, upstream
+// proxy, etc.) collapses to `server_error`. Distinct codes make
+// incident triage easier — a flood of `internal_error` means the
+// server is throwing; a flood of `server_error` means something
+// upstream is stripping envelopes.
 export type ApiErrorCode =
   | "invalid_input"
   | "pdf_encrypted"
@@ -31,15 +38,7 @@ export type ApiErrorCode =
   | "open_flags"
   | "internal_error"
   | "network_error"
-  | "server_error"
-  // SPEC §13 / Phase 8 review: the backend may surface an
-  // `internal_error` for unexpected 5xx cases that DO carry an
-  // envelope (vs `server_error` which is the client's fallback
-  // when the body isn't a well-formed envelope). Distinct codes
-  // make incident triage easier — a flood of `internal_error`
-  // means the server is throwing; a flood of `server_error`
-  // means something upstream is stripping envelopes.
-  | "internal_error";
+  | "server_error";
 
 const KNOWN_CODES = new Set<ApiErrorCode>([
   "invalid_input",
@@ -57,7 +56,6 @@ const KNOWN_CODES = new Set<ApiErrorCode>([
   "internal_error",
   "network_error",
   "server_error",
-  "internal_error",
 ]);
 
 export class ApiError extends Error {
@@ -104,33 +102,6 @@ export async function apiErrorFromResponse(res: Response): Promise<ApiError> {
     body = await res.json();
   } catch {
     parsedOk = false;
-  }
-
-  // Any HTTP 500 → server_error locally, regardless of the
-  // backend's envelope code (SPEC §13 coordinated change: the
-  // server emits `internal_error` on 500; the UI collapses that
-  // into the one 500-shaped error state). `details.raw_code`
-  // preserves the backend code for logs so a mis-mapping is
-  // still diagnosable.
-  if (status === 500) {
-    let rawCode: string | null = null;
-    let message = "Something went wrong on our end.";
-    if (
-      parsedOk &&
-      body &&
-      typeof body === "object" &&
-      "error" in body &&
-      body.error &&
-      typeof body.error === "object"
-    ) {
-      const env = (body as { error: unknown }).error as {
-        code?: unknown;
-        message?: unknown;
-      };
-      if (typeof env.code === "string") rawCode = env.code;
-      if (typeof env.message === "string") message = env.message;
-    }
-    return new ApiError("server_error", message, status, { raw_code: rawCode });
   }
 
   if (!parsedOk) {

@@ -236,7 +236,7 @@ const LABOR: LaborLine[] = [
 ];
 
 const ASSUMPTIONS: AssumptionView[] = [
-  { item_id: "item_5", text: "Length not specified — assumed 8 ft" },
+  { item_id: "item_5", text: "Length not specified — code picked 12 ft (least waste)" },
   { item_id: "item_13", text: "Drywall type not specified — defaulted to Type-X" },
   { item_id: "item_17", text: 'Unit converted from "12 yards" via pint fallback' },
   { item_id: "item_19", text: "Roofing type not specified — defaulted to 3-tab asphalt" },
