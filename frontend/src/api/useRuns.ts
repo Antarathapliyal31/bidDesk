@@ -11,6 +11,7 @@ import {
 } from "@/dev-fixtures";
 
 import type { ApiError } from "./ApiError";
+import { apiFetch, USE_FIXTURES } from "./client";
 
 /**
  * Run list for the History page. Paginated via `next_cursor`.
@@ -64,11 +65,26 @@ function pageFromFixtures(status: RunStatus | undefined, cursor: string | undefi
   return { items, next_cursor };
 }
 
+async function fetchRunsPage(
+  status: RunStatus | undefined,
+  cursor: string | undefined,
+): Promise<RunsPage> {
+  const qs = new URLSearchParams();
+  if (status) qs.set("status", status);
+  if (cursor) qs.set("cursor", cursor);
+  const url = `/api/runs${qs.toString() ? `?${qs.toString()}` : ""}`;
+  const res = await apiFetch(url);
+  return (await res.json()) as RunsPage;
+}
+
 export function useRuns(params: UseRunsParams = {}) {
   const key = { status: params.status ?? null };
   return useInfiniteQuery<RunsPage, ApiError, InfData, [string, typeof key], string | undefined>({
     queryKey: ["runs", key],
-    queryFn: ({ pageParam }) => withDelay(pageFromFixtures(params.status, pageParam)),
+    queryFn: ({ pageParam }) =>
+      USE_FIXTURES
+        ? withDelay(pageFromFixtures(params.status, pageParam))
+        : fetchRunsPage(params.status, pageParam),
     initialPageParam: undefined,
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     // Let TanStack's generics infer the query type. Logic lives in

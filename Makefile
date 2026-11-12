@@ -89,10 +89,26 @@ lint:
 check: lint check-samples test
 
 gen-api:
-	@echo "gen-api: not yet implemented (Phase 6)."
+	@cd backend && ../$(VENV)/bin/python -c "import json; from app.main import create_app; print(json.dumps(create_app().openapi(), indent=2))" > ../frontend/openapi.json
+	cd frontend && ./node_modules/.bin/openapi-typescript openapi.json -o src/api/schema.gen.ts
+	@echo "gen-api: wrote frontend/openapi.json + src/api/schema.gen.ts"
 
 check-contract:
-	@echo "check-contract: not yet implemented (Phase 6)."
+	@set -e; \
+	cd backend && ../$(VENV)/bin/python -c "import json; from app.main import create_app; print(json.dumps(create_app().openapi(), indent=2))" > ../frontend/openapi.json.check; \
+	cd ..; \
+	if ! cmp -s frontend/openapi.json frontend/openapi.json.check; then \
+	  rm -f frontend/openapi.json.check; \
+	  echo "check-contract: frontend/openapi.json is stale — run 'make gen-api'"; exit 1; \
+	fi; \
+	rm -f frontend/openapi.json.check; \
+	cd frontend && ./node_modules/.bin/openapi-typescript openapi.json -o src/api/schema.gen.ts.check 2>/dev/null; \
+	if ! cmp -s src/api/schema.gen.ts src/api/schema.gen.ts.check; then \
+	  rm -f src/api/schema.gen.ts.check; \
+	  echo "check-contract: src/api/schema.gen.ts is stale — run 'make gen-api'"; exit 1; \
+	fi; \
+	rm -f src/api/schema.gen.ts.check; \
+	echo "check-contract: contract files match."
 
 # Delete the runtime run DB so the next backend start rebuilds
 # it from the current schema.sql. Needed any time a CHECK

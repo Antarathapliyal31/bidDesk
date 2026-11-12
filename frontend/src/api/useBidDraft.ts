@@ -36,7 +36,9 @@ import {
 } from "@/lib/bidDraftReducer";
 
 import type { ApiError } from "./ApiError";
+import { isApiError } from "./ApiError";
 import type { Bid, EditOp, RepriceProposal } from "./bid";
+import { apiFetch, USE_FIXTURES } from "./client";
 
 const AUTOSAVE_MS = 800;
 const PATCH_LATENCY_MS = 400;
@@ -86,13 +88,18 @@ export function useBidDraft(runId: string): UseBidDraftResult {
     [],
   );
 
-  // Initial fetch (TanStack Query). The fixture returns an
-  // envelope that matches SPEC §13 `GET /api/runs/:id` — the
-  // current bid plus the agent revision 0 for diffing. Phase 5
-  // merge: swap `getFixtureBid` for `fetch`, same envelope.
+  // Initial fetch. Fixture mode resolves to a scripted envelope;
+  // real mode reads `GET /api/runs/{id}` and pulls the `bid` +
+  // `agent_bid` keys out. Shape matches `FixtureBidEnvelope`.
   const query = useQuery<FixtureBidEnvelope | null, ApiError>({
     queryKey: ["bid", runId],
-    queryFn: () => withDelay(getFixtureBid(runId), 150),
+    queryFn: async () => {
+      if (USE_FIXTURES) return withDelay(getFixtureBid(runId), 150);
+      const res = await apiFetch(`/api/runs/${runId}`);
+      const detail = (await res.json()) as { bid: Bid | null; agent_bid: Bid | null };
+      if (!detail.bid || !detail.agent_bid) return null;
+      return { bid: detail.bid, agent_bid: detail.agent_bid };
+    },
     staleTime: Infinity,
     retry: false,
   });
@@ -123,20 +130,44 @@ export function useBidDraft(runId: string): UseBidDraftResult {
     const opsToSave = current.pendingOps;
     dispatch({ type: "saveStarted" });
     try {
-      // Simulate a PATCH: revision guard + apply + delay.
-      const serverBid = await withDelay(
-        applier(current.serverDraft, opsToSave),
-        PATCH_LATENCY_MS,
-      );
-      // Stale revision guard would go here in prod. Fixture
-      // mode has no concurrent writers.
+      let serverBid: Bid;
+      if (USE_FIXTURES) {
+        serverBid = await withDelay(applier(current.serverDraft, opsToSave), PATCH_LATENCY_MS);
+      } else {
+        const res = await apiFetch(`/api/runs/${runId}/bid`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            draft_revision: current.serverDraft.revision,
+            ops: opsToSave,
+          }),
+        });
+        const payload = (await res.json()) as { bid: Bid };
+        serverBid = payload.bid;
+      }
       dispatch({ type: "saveSucceeded", bid: serverBid, applier });
-      // Update the cache with the new envelope. agent_bid is
-      // immutable so we reuse the previously-cached value.
       qc.setQueryData<FixtureBidEnvelope>(["bid", runId], (prev) =>
         prev ? { ...prev, bid: serverBid } : { bid: serverBid, agent_bid: serverBid },
       );
     } catch (err) {
+      // Stale revision (409): the backend returns the server's
+      // current Bid in `details.current` — reseed the reducer so
+      // the user can redo their edit against the fresh revision.
+      if (isApiError(err) && err.code === "stale_revision") {
+        const current = (err.details as { current?: Bid } | undefined)?.current;
+        if (current) {
+          const prev = qc.getQueryData<FixtureBidEnvelope>(["bid", runId]);
+          qc.setQueryData<FixtureBidEnvelope>(["bid", runId], (p) =>
+            p ? { ...p, bid: current } : { bid: current, agent_bid: current },
+          );
+          dispatch({
+            type: "fetchSucceeded",
+            bid: current,
+            agentBid: prev?.agent_bid ?? current,
+          });
+          return;
+        }
+      }
       const message = err instanceof Error ? err.message : "Save failed";
       dispatch({ type: "saveTransportError", message });
     }
@@ -175,14 +206,23 @@ export function useBidDraft(runId: string): UseBidDraftResult {
   );
 
   const finalize = useCallback(async (): Promise<Bid | null> => {
-    // Flush any pending save first so we finalize the server
-    // state, not a stale one.
     if (stateRef.current.pendingOps.length > 0) {
       await runSave();
     }
     const current = stateRef.current;
     if (!current.serverDraft || !current.agentBid) return null;
-    const finalized = await withDelay(fixtureFinalize(current.serverDraft), 200);
+    let finalized: Bid;
+    if (USE_FIXTURES) {
+      finalized = await withDelay(fixtureFinalize(current.serverDraft), 200);
+    } else {
+      const res = await apiFetch(`/api/runs/${runId}/bid/finalize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ draft_revision: current.serverDraft.revision }),
+      });
+      const payload = (await res.json()) as { bid: Bid };
+      finalized = payload.bid;
+    }
     dispatch({ type: "fetchSucceeded", bid: finalized, agentBid: current.agentBid });
     qc.setQueryData<FixtureBidEnvelope>(["bid", runId], (prev) =>
       prev ? { ...prev, bid: finalized } : { bid: finalized, agent_bid: finalized },
