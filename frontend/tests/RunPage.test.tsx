@@ -56,7 +56,7 @@ describe("RunPage", () => {
     expect(bidTab).toBeDisabled();
   });
 
-  it("after the fixture stream drains: Bid tab is enabled, auto-selected, and shows the summary", () => {
+  it("after the fixture stream drains: Bid tab is enabled + auto-selected", () => {
     renderAt("/runs/run_demo_messy");
     // Drain every scheduled setTimeout (fixture driver fires at
     // i * 150ms by default; runAllTimers races through).
@@ -69,9 +69,7 @@ describe("RunPage", () => {
     const bidTab = screen.getByRole("tab", { name: /^bid/i });
     expect(bidTab).not.toBeDisabled();
     expect(bidTab).toHaveAttribute("data-state", "active");
-    // Summary card visible.
-    expect(screen.getByRole("heading", { level: 2, name: /^bid ready$/i })).toBeInTheDocument();
-    // Open flags count surfaces somewhere (fixture = 12 per SPEC §9.3).
-    expect(screen.getAllByText("12").length).toBeGreaterThan(0);
+    // Full BidWorkspace content is tested in tests/BidWorkspace.test.tsx;
+    // here we just check the tab wired through.
   });
 });

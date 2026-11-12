@@ -39,6 +39,7 @@ export const API_ERROR_MESSAGES = {
   internal_error: "Something went wrong on our end.",
   network_error: "Can't reach the server — check your connection.",
   server_error: "Something went wrong on our side. Try again in a moment.",
+  internal_error: "The server hit an error handling that request. Try again.",
 } as const;
 
 function tooLargeMessage(err: ApiError): string {
