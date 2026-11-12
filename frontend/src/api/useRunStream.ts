@@ -1,25 +1,19 @@
 /**
  * Live-run stream hook (SPEC §11.3).
  *
- * Real path:
- *   1. `GET /api/runs/{id}/events?after_id=0` — replay persisted
- *      events through the reducer (drained in the useReducer
- *      initializer when the run is already finished, so the
- *      terminal state is on first paint).
- *   2. `EventSource('/api/runs/{id}/stream')` for live events;
- *      Last-Event-ID replay is handled by the browser and the
- *      backend honours it on reconnect. Every message is
- *      JSON.parse'd and dispatched.
- *   3. SSE errors flip `connection` to "reconnecting"; the browser
- *      handles retry automatically. We close on `run.finished`.
+ * Real path: open `EventSource('/api/runs/{id}/stream')` and
+ * dispatch every parsed frame into the reducer. The backend's
+ * `/stream` route first replays every persisted event (after the
+ * `Last-Event-ID` header or `?after_id=` query, defaulting to 0),
+ * then flips to live without a gap. No separate `/events` fetch —
+ * doing both would deliver each event twice. The reducer's
+ * `event.id <= state.lastEventId` guard (runReducer.ts) is a belt
+ * on top of the braces.
  *
  * Fixture path (`VITE_FIXTURES=1`):
  *   - "live"    → scripted stream played event-by-event.
  *   - "instant" → scripted stream drained in the initializer.
  *   - null      → unknown runId; connection: "closed".
- *
- * RunId-change handling: RunPage is keyed by `runId` (router.tsx)
- * so a new runId remounts this hook and re-runs the initializer.
  */
 import { useEffect, useReducer, useState } from "react";
 
@@ -35,7 +29,7 @@ import {
   type RunViewState,
 } from "@/lib/runReducer";
 
-import { apiFetch, USE_FIXTURES } from "./client";
+import { USE_FIXTURES } from "./client";
 import type { RunEvent } from "./events";
 
 export const isReusedStream = _isReusedStream;
@@ -78,56 +72,31 @@ export function useRunStream(
     return () => stop();
   }, [runId, intervalMs]);
 
-  // Real branch: replay persisted events, then open SSE.
+  // Real branch: one SSE connection carries replay + live.
   useEffect(() => {
     if (USE_FIXTURES) return undefined;
-    let cancelled = false;
-    let es: EventSource | null = null;
-
-    (async () => {
+    const es = new EventSource(`/api/runs/${runId}/stream`);
+    setConnection("connecting");
+    es.onopen = () => setConnection("live");
+    es.onmessage = (ev) => {
       try {
-        const res = await apiFetch(`/api/runs/${runId}/events?after_id=0`);
-        const events = (await res.json()) as RunEvent[];
-        if (cancelled) return;
-        for (const e of events) dispatch(e);
-        // If the replay already contained `run.finished` the stream
-        // is closed for good — no SSE needed.
-        if (events.some((e) => e.type === "run.finished")) {
+        const parsed = JSON.parse(ev.data) as RunEvent;
+        dispatch(parsed);
+        if (parsed.type === "run.finished") {
+          es.close();
           setConnection("closed");
-          return;
         }
       } catch {
-        if (!cancelled) setConnection("closed");
-        return;
-      }
-
-      if (cancelled) return;
-      es = new EventSource(`/api/runs/${runId}/stream`);
-      setConnection("live");
-      es.onmessage = (ev) => {
-        try {
-          const parsed = JSON.parse(ev.data) as RunEvent;
-          dispatch(parsed);
-          if (parsed.type === "run.finished") {
-            es?.close();
-            setConnection("closed");
-          }
-        } catch {
-          // Malformed frame — surface via connection state; don't
-          // throw out of a browser callback.
-          setConnection("reconnecting");
-        }
-      };
-      es.onerror = () => {
-        // Browser will auto-retry with Last-Event-ID; flag it so
-        // the UI can show a reconnect indicator.
         setConnection("reconnecting");
-      };
-    })();
-
+      }
+    };
+    es.onerror = () => {
+      // Browser auto-retries with Last-Event-ID; flag it so the UI
+      // can surface a reconnect indicator.
+      setConnection("reconnecting");
+    };
     return () => {
-      cancelled = true;
-      es?.close();
+      es.close();
     };
   }, [runId]);
 

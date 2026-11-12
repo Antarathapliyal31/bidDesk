@@ -235,6 +235,16 @@ function PricedCell({ item }: { item: ItemStreamView }) {
       </span>
     );
   }
+  if (p.status === "needs_review") {
+    return (
+      <span
+        className="inline-flex items-center rounded border border-warn-amber/30 bg-warn-amber/10 px-1.5 py-0.5 text-[10px] font-medium text-warn-amber-text"
+        title="Server flagged this line for human review."
+      >
+        Needs review
+      </span>
+    );
+  }
   if (p.status === "skipped") {
     return (
       <span className="inline-flex items-center text-xs text-muted-foreground">Skipped</span>

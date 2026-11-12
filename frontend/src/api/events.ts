@@ -74,7 +74,14 @@ export type TransferOption = {
  */
 export type PricedLineView = {
   item_id: string;
-  status: "matched" | "substitute" | "no_match" | "failed" | "timeout" | "skipped";
+  status:
+    | "matched"
+    | "substitute"
+    | "no_match"
+    | "failed"
+    | "timeout"
+    | "skipped"
+    | "needs_review";
   sku: string | null;
   product_name: string | null;
   sale_qty: string | null; // Decimal as string per SPEC §9.1
