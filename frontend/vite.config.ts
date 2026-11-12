@@ -21,5 +21,8 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./tests/setup.ts"],
+    // Playwright owns tests/e2e/* — vitest would try to import them
+    // and crash on `@playwright/test`'s expect clash.
+    exclude: ["node_modules/**", "dist/**", "tests/e2e/**"],
   },
 });

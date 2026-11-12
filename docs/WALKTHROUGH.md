@@ -532,3 +532,34 @@ with generator, four PDFs/text, four expected JSONs.
 - `HistoryPage.test.tsx` — pagination (5 → 8 rows + Load-more
   disappears), empty state with CTA, error state with mapped
   ApiError message + retry.
+
+## frontend/tests/e2e/ (Phase 9)
+- `newBidToFinalize.spec.ts` — Playwright happy-path:
+  `/new` → pick rfp_messy sample → Run → Live view mounts →
+  Bid tab auto-selects on bid.ready → accept a flagged line →
+  save pill rolls to "Saved" → Trace tab visible → nav to
+  `/runs`. Fixture-backed on this branch; Phase-5 merge flips
+  the backend to `LLM_MODE=fake` and the same spec drives the
+  real pipeline.
+
+## frontend/playwright.config.ts (Phase 9)
+- Points at `tests/e2e/`, chromium only, `reuseExistingServer`
+  on local dev, auto-starts `npm run dev` otherwise. CI should
+  cache `~/.cache/ms-playwright`.
+
+## docs/CHECKLIST.md (Phase 9)
+- SPEC §11.4 state-by-state status table.
+- SPEC §15 phase-by-phase table.
+- Keyboard shortcuts coverage.
+- Design-system checks.
+- Known gaps (what's not shipped, with reasons).
+- Demo walkthrough paths for a reviewer.
+
+## README.md (Phase 9)
+- Quickstart.
+- Architecture diagram + delegation sequence.
+- State model + guardrail table.
+- Failure-injection demo.
+- Trade-offs + "what I'd change for a paying customer".
+- Honest "what's broken" list.
+- "What was AI-assisted and how it was reviewed" closer.
