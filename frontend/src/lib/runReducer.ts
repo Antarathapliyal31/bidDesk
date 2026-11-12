@@ -86,6 +86,14 @@ export type ItemStreamView = {
   quantity_text: string | null;
   unit_raw: string | null;
   page: number | null;
+  /**
+   * The source quote from `item.source.quote` (SPEC §9.1). Null for
+   * vision reads or items whose quote failed verification. Carried
+   * through to the SourcePanel so the callout + the PdfViewer's
+   * `customTextRenderer` highlight both have something to match
+   * against.
+   */
+  quote: string | null;
   verified: boolean;
   read_via: "text" | "vision" | null;
   notes: string[];
@@ -97,6 +105,17 @@ export type FlagView = { item_id: string; reason_code: string; message: string |
 
 export type RunViewState = {
   lastEventId: number;
+  /**
+   * Timestamp of the most recent event (ISO 8601 UTC). Single
+   * source of truth for elapsed time (RunHeader + TraceView) —
+   * `elapsed = lastEventTs - startedAtTs`. Deliberately NOT
+   * `Date.now()`-based: fixture ts can be far from wall-clock, and
+   * mixing the two produced "538:49" in the header while the
+   * Trace tab correctly showed "0:12". In production, SSE events
+   * arrive often enough that this advances naturally; on a
+   * finished run it freezes on `run.finished.ts`.
+   */
+  lastEventTs: string | null;
   status: RunStatus;
   outcome: Outcome | null;
   outcomeDetail: string | null;
@@ -122,8 +141,22 @@ export type RunViewState = {
   } | null;
 };
 
+/**
+ * Elapsed seconds derived from the reducer state. Pure helper so
+ * RunHeader and TraceView never disagree. Returns 0 until both
+ * `startedAtTs` and `lastEventTs` are set.
+ */
+export function elapsedSecondsFromState(state: RunViewState): number {
+  if (state.startedAtTs === null || state.lastEventTs === null) return 0;
+  const start = new Date(state.startedAtTs).getTime();
+  const last = new Date(state.lastEventTs).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(last)) return 0;
+  return Math.max(0, Math.floor((last - start) / 1000));
+}
+
 export const initialRunViewState: RunViewState = {
   lastEventId: 0,
+  lastEventTs: null,
   status: "running",
   outcome: null,
   outcomeDetail: null,
@@ -266,7 +299,7 @@ function restoreAgentLane(
 
 export function runReducer(state: RunViewState, event: RunEvent): RunViewState {
   if (event.id <= state.lastEventId) return state;
-  const base: RunViewState = { ...state, lastEventId: event.id };
+  const base: RunViewState = { ...state, lastEventId: event.id, lastEventTs: event.ts };
 
   switch (event.type) {
     case "run.started":
@@ -410,6 +443,7 @@ export function runReducer(state: RunViewState, event: RunEvent): RunViewState {
         quantity_text: v.quantity_text,
         unit_raw: v.unit_raw,
         page: v.source.page,
+        quote: v.source.quote,
         verified: v.source.verified,
         read_via: v.source.read_via,
         notes: v.notes,
@@ -473,12 +507,17 @@ export function runReducer(state: RunViewState, event: RunEvent): RunViewState {
       };
 
     case "run.finished": {
-      // "partial" / "failed" → running work that never got to finish
-      // is "interrupted", not "finished"/"done". "completed" keeps
-      // the clean terminal state. Lanes that had already "failed"
-      // keep their failed state + errorKind.
+      // "partial" / "failed" / "interrupted" → running work that
+      // never got to finish is "interrupted", not "finished"/"done".
+      // "interrupted" is what SPEC §10.5 emits on startup after a
+      // server restart found a run still marked "running" (e.g.
+      // process crash mid-stream). "completed" keeps the clean
+      // terminal state. Lanes that had already "failed" keep their
+      // failed state + errorKind.
       const terminal =
-        event.payload.status === "partial" || event.payload.status === "failed";
+        event.payload.status === "partial" ||
+        event.payload.status === "failed" ||
+        event.payload.status === "interrupted";
       const spanTerminalState: SpanView["state"] = terminal ? "interrupted" : "finished";
       const laneWorkingTerminalState: AgentLaneView["state"] = terminal ? "interrupted" : "done";
 

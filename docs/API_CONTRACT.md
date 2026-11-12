@@ -254,21 +254,35 @@ one `bid` key (the current authoritative state — draft while
 editing, final once finalized) plus `agent_bid` and `diff` for
 history views. Agree at Phase 5 merge or amend SPEC.
 
+**Run summary alongside the bid.** The response also carries the
+run-level summary fields the client needs independently of the
+event stream — `id`, `status`, `outcome`, `input_kind`,
+`input_name`, `project_name`, `branch_id`, `created_at`,
+`finished_at`. The frontend's `useRunSummary(runId)` hook reads
+these (see DECISIONS F9) for the header title (`project_name`)
+and the History page's totals (`created_at`, `finished_at`,
+`finalized_at`). `project_name` MUST NOT be carried on the
+`run.started` event — at ingest the analyst hasn't read the PDF,
+so the server can't know it yet.
+
 Response body (shape mirrors SPEC §9.1 `Bid` + runtime fields):
 
 ```json
 {
   "id":            "run_...",
-  "status":        "...",
-  "outcome":       "...",
-  "outcome_detail":"...",
+  "status":        "running | completed | partial | failed | interrupted",
+  "outcome":       "bid_ready | no_materials | budget_exhausted | error" | null,
+  "outcome_detail":"..." | null,
   "input": {
     "kind":        "pdf | text",
     "name":        "...",
     "page_count":  8 | null
   },
-  "branch":        { "id": "BR-NJ-01", "name": "BidDesk North Jersey", "tax_rate_ppm": 66250 },
   "project":       { "name": "..." | null, "due_date_text": "..." | null },
+  "branch":        { "id": "BR-NJ-01", "name": "BidDesk North Jersey", "tax_rate_ppm": 66250 },
+  "created_at":    "2026-11-10T13:02:11Z",
+  "finished_at":   "2026-11-10T13:04:53Z" | null,
+  "finalized_at":  "2026-11-10T13:12:44Z" | null,
   "bid":           Bid,                 // current authoritative state
   "agent_bid":     Bid | null,          // immutable agent revision 0 (for diffing)
   "diff":          BidDiff | null,      // populated once a final exists
@@ -276,6 +290,13 @@ Response body (shape mirrors SPEC §9.1 `Bid` + runtime fields):
   "tokens_out":    8901
 }
 ```
+
+Field aliases the hook accepts (both snake_case; see SPEC §5.1):
+`input.kind` ⇔ `input_kind`, `input.name` ⇔ `input_name`,
+`project.name` ⇔ `project_name`, `branch.id` ⇔ `branch_id`. The
+response uses the nested form for readability; `useRunSummary`
+flattens to the `FxRunSummary` shape at the boundary so call
+sites stay flat.
 
 `Bid` (SPEC §9.1):
 
@@ -467,6 +488,25 @@ Event payloads (type-specific):
 | `budget.exhausted`  | `budget` (turns / tokens / deadline), `detail`                                                                           |
 | `bid.ready`         | `revision`, `generated_by`, `open_flags`                                                                                 |
 | `run.finished`      | `status`, `outcome`, `outcome_detail`                                                                                    |
+
+### `GET /api/runs/{id}/source.pdf` — original uploaded PDF — SPEC §11.2
+
+Returns `application/pdf`. Used by the SourcePanel's `PdfViewer`
+(react-pdf `<Document file={url} />`). 404 when the run has no PDF
+source (paste runs, uploaded file purged, text-only inputs); the
+panel falls back to the "no PDF available" placeholder.
+
+- `Cache-Control: private, max-age=600` is fine — the uploaded PDF
+  for a given run id is immutable.
+- No auth beyond the same session gate as other run endpoints.
+- No range-request handling needed for Phase 7 (react-pdf fetches
+  the whole file); revisit for Phase 8+ if we add in-page scroll.
+- Served from `backend/data/uploads/{run_id}.pdf` per SPEC §5.1.
+
+Fixture mode: the frontend currently maps `run_demo_*` ids to
+`/samples/rfp_messy.pdf` (see `src/features/run/source/pdfRunUrl.ts`
+and DECISIONS F8) — the Phase-5 merge replaces that helper with a
+one-line `return `/api/runs/${runId}/source.pdf``.
 
 ### `GET /api/branches` — `useBranches()` — **present**
 

@@ -11,20 +11,26 @@ import { cn } from "@/lib/utils";
  * One row of the runs table (SPEC §11.1 History). Entirely a link
  * so a click / Enter navigates to the run page.
  *
- * sr-only labels sit inline so a screen reader hears
- * "<status>, project <name>, branch <name>, N priced lines, N open
- * flags, total <money>, created <date>" without us drawing a <table>
- * (the row has to be a <Link>, so proper table semantics don't fit).
+ * Column grid: `120px minmax(0, 1fr) 120px 70px 70px 110px 110px`.
+ * Project · Input gets the slack (`minmax(0, 1fr)` so truncate works
+ * — a plain `1fr` keeps its content's intrinsic min-width). Branch
+ * is narrower than before so project text doesn't crowd it.
  *
- * The visible created date is short; the hoverable `title` carries
- * the full ISO timestamp for precise auditing. Finalized date
- * (when present) appears in the secondary line next to the diff.
+ * Numeric columns (Lines, Flags, Total) are right-aligned; headers
+ * mirror the alignment. Created has extra left padding so it reads
+ * as a separate group from the money cell.
+ *
+ * Lines + Flags render as "—" (not 0) when the run isn't terminal
+ * with a priced bid (`running | failed | interrupted`): there isn't
+ * yet a credible number to show.
  */
 type Props = {
   run: RunSummary;
   selected: boolean;
   onSelect: () => void;
 };
+
+export const ROW_GRID = "grid-cols-[120px_minmax(0,1fr)_120px_70px_70px_110px_110px]";
 
 function diffSummary(d: RunSummary["diff"]): string | null {
   if (!d) return null;
@@ -36,6 +42,10 @@ function diffSummary(d: RunSummary["diff"]): string | null {
   return parts.length > 0 ? parts.join(", ") : "No changes";
 }
 
+function hasPricedBid(status: RunSummary["status"]): boolean {
+  return status === "completed" || status === "partial";
+}
+
 export function RunRow({ run, selected, onSelect }: Props) {
   const diff = diffSummary(run.diff);
   const finalized = run.finalized_at ? formatShortDate(run.finalized_at) : null;
@@ -44,6 +54,9 @@ export function RunRow({ run, selected, onSelect }: Props) {
   if (finalized) subtitleParts.push(`finalized ${finalized}`);
   const subtitle = subtitleParts.join(" · ");
   const createdShort = formatShortDate(run.created_at);
+  const showNumbers = hasPricedBid(run.status);
+
+  const projectName = run.project_name ?? "Untitled";
 
   return (
     <Link
@@ -51,41 +64,67 @@ export function RunRow({ run, selected, onSelect }: Props) {
       onFocus={onSelect}
       onMouseEnter={onSelect}
       className={cn(
-        "grid grid-cols-[140px_1fr_160px_70px_70px_120px_110px] items-center gap-4 border-b border-border px-4 py-2.5 text-sm transition-colors hover:bg-muted/40",
+        "grid items-center gap-4 border-b border-border px-4 py-2.5 text-sm transition-colors hover:bg-muted/40",
+        ROW_GRID,
         selected && "bg-accent",
       )}
     >
       <StatusBadge status={run.status} />
 
       <div className="min-w-0">
-        <p className="truncate font-medium text-foreground">
+        <p className="truncate font-medium text-foreground" title={projectName}>
           <span className="sr-only">Project </span>
-          {run.project_name ?? <span className="text-muted-foreground">Untitled</span>}
+          {run.project_name ? projectName : <span className="text-muted-foreground">Untitled</span>}
         </p>
-        <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+        <p className="truncate text-xs text-muted-foreground" title={subtitle}>
+          {subtitle}
+        </p>
       </div>
 
-      <p className="truncate text-xs text-muted-foreground">
+      <p className="truncate text-xs text-muted-foreground" title={run.branch_name}>
         <span className="sr-only">Branch </span>
         {run.branch_name}
       </p>
 
       <p className="tabular text-right text-xs text-muted-foreground">
-        <span className="sr-only">{run.priced_lines} priced lines</span>
-        <span aria-hidden>{run.priced_lines}</span>
+        {showNumbers ? (
+          <>
+            <span className="sr-only">{run.priced_lines} priced lines</span>
+            <span aria-hidden>{run.priced_lines}</span>
+          </>
+        ) : (
+          <>
+            <span className="sr-only">priced lines not available yet</span>
+            <span aria-hidden>—</span>
+          </>
+        )}
       </p>
 
       <p className="tabular text-right text-xs">
-        <span className="sr-only">{run.open_flags} open flags</span>
-        {run.open_flags > 0 ? (
-          <span aria-hidden className="inline-flex items-center gap-1 text-warn-amber-text">
-            <FlagIcon className="size-3.5" />
-            {run.open_flags}
-          </span>
+        {showNumbers ? (
+          <>
+            <span className="sr-only">{run.open_flags} open flags</span>
+            {run.open_flags > 0 ? (
+              <span
+                aria-hidden
+                className="inline-flex items-center gap-1 text-warn-amber-text"
+              >
+                <FlagIcon className="size-3.5" />
+                {run.open_flags}
+              </span>
+            ) : (
+              <span aria-hidden className="text-muted-foreground">
+                0
+              </span>
+            )}
+          </>
         ) : (
-          <span aria-hidden className="text-muted-foreground">
-            0
-          </span>
+          <>
+            <span className="sr-only">open flags not available yet</span>
+            <span aria-hidden className="text-muted-foreground">
+              —
+            </span>
+          </>
         )}
       </p>
 
@@ -97,7 +136,7 @@ export function RunRow({ run, selected, onSelect }: Props) {
       <time
         dateTime={run.created_at}
         title={run.created_at}
-        className="tabular text-xs text-muted-foreground"
+        className="tabular pl-3 text-xs text-muted-foreground"
       >
         <span className="sr-only">Created </span>
         {createdShort}

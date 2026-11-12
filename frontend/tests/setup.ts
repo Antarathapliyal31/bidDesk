@@ -21,9 +21,30 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 // test files load cleanly.
 if (typeof window !== "undefined") {
   if (typeof globalThis.Element !== "undefined") {
-    const proto = Element.prototype as unknown as { scrollIntoView?: unknown };
+    const proto = Element.prototype as unknown as {
+      scrollIntoView?: unknown;
+      hasPointerCapture?: unknown;
+      setPointerCapture?: unknown;
+      releasePointerCapture?: unknown;
+    };
     if (typeof proto.scrollIntoView === "undefined") {
       (Element.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView = () => {};
+    }
+    // Radix Select + Dropdown call these in pointer handlers; jsdom
+    // doesn't implement the Pointer Events API. No-op stubs are
+    // enough for component tests that just want to open/close
+    // Radix popovers.
+    if (typeof proto.hasPointerCapture === "undefined") {
+      (Element.prototype as unknown as { hasPointerCapture: () => boolean }).hasPointerCapture =
+        () => false;
+    }
+    if (typeof proto.setPointerCapture === "undefined") {
+      (Element.prototype as unknown as { setPointerCapture: () => void }).setPointerCapture =
+        () => {};
+    }
+    if (typeof proto.releasePointerCapture === "undefined") {
+      (Element.prototype as unknown as { releasePointerCapture: () => void }).releasePointerCapture =
+        () => {};
     }
   }
 

@@ -110,6 +110,27 @@ describe("HistoryPage", () => {
     );
   });
 
+  it("non-terminal rows (running / failed / interrupted) render '—' for Lines + Flags, not 0", async () => {
+    render(
+      <TestWrap>
+        <HistoryPage />
+      </TestWrap>,
+    );
+    // The running fixture (run_demo_a1) has priced_lines: 0, open_flags: 0.
+    // A terminal "completed" row has >0 priced_lines and we don't
+    // want to treat that one as the test subject.
+    const runningRow = await screen.findByRole("link", {
+      name: new RegExp("Maple St. Duplex".replace(/\./g, "\\."), "i"),
+    });
+    expect(runningRow).toBeInTheDocument();
+    // Scope the dash assertion to the running row to avoid matching
+    // other rows' em-dashes (e.g. "no value" in Money).
+    const dashes = runningRow.querySelectorAll("[aria-hidden]");
+    const dashTexts = Array.from(dashes).map((n) => n.textContent);
+    // At least two em-dashes (Lines + Flags) inside this row.
+    expect(dashTexts.filter((t) => t === "—").length).toBeGreaterThanOrEqual(2);
+  });
+
   it("renders the error state + Try again calls refetch", async () => {
     const user = userEvent.setup();
     const refetchSpy = vi.fn().mockResolvedValue(undefined);

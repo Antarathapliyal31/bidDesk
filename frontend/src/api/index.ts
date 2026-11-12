@@ -24,6 +24,7 @@ export type {
   TransferOption,
 } from "./events";
 export {
+  isReusedStream,
   useRunStream,
   type UseRunStreamOptions,
   type UseRunStreamResult,
@@ -35,6 +36,7 @@ export {
   type CreateRunPayload,
   type CreateRunResult,
 } from "./useCreateRun";
+export { useRunSummary, type RunSummary as RunSummaryDetail } from "./useRunSummary";
 export { useSamples, type Sample } from "./useSamples";
 export { useFaults, type Fault, type FaultKey, type FaultsMeta } from "./useFaults";
 export {
