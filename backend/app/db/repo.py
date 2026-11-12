@@ -24,6 +24,7 @@ INSERT into `events` directly.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any, Literal
 
 import aiosqlite
@@ -916,4 +917,320 @@ async def insert_rejected_claim(
             payload=payload,
             reason=reason,
             created_at=created_at,
+        )
+
+
+# ---------------------------------------------------------------------------
+# runs: finalize + list + detail
+# ---------------------------------------------------------------------------
+
+
+async def finalize_run_status(
+    db: Database,
+    *,
+    run_id: str,
+    status: str,
+    outcome: str | None,
+    outcome_detail: str | None = None,
+) -> None:
+    """Flip `runs.status` + `outcome` + `outcome_detail` +
+    `finished_at`. The runner calls this at the terminal state."""
+
+    now = _now_iso()
+    async with db.write() as conn:
+        await conn.execute(
+            """
+            UPDATE runs
+            SET status = ?, outcome = ?, outcome_detail = ?, finished_at = ?
+            WHERE id = ?
+            """,
+            (status, outcome, outcome_detail, now, run_id),
+        )
+
+
+async def set_run_project_name(db: Database, *, run_id: str, project_name: str | None) -> None:
+    async with db.write() as conn:
+        await conn.execute(
+            "UPDATE runs SET project_name = ? WHERE id = ?",
+            (project_name, run_id),
+        )
+
+
+def _now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
+
+
+async def get_run(db: Database, *, run_id: str) -> dict[str, Any] | None:
+    cur = await db.read_conn.execute(
+        """
+        SELECT id, created_at, finished_at, status, outcome, outcome_detail,
+               input_kind, input_name, project_name, branch_id,
+               tokens_in, tokens_out, faults_json
+        FROM runs
+        WHERE id = ?
+        """,
+        (run_id,),
+    )
+    try:
+        row = await cur.fetchone()
+    finally:
+        await cur.close()
+    if row is None:
+        return None
+    return {
+        "id": row[0],
+        "created_at": row[1],
+        "finished_at": row[2],
+        "status": row[3],
+        "outcome": row[4],
+        "outcome_detail": row[5],
+        "input_kind": row[6],
+        "input_name": row[7],
+        "project_name": row[8],
+        "branch_id": row[9],
+        "tokens_in": row[10],
+        "tokens_out": row[11],
+        "faults_json": row[12],
+    }
+
+
+async def list_runs_page(
+    db: Database,
+    *,
+    status: str | None = None,
+    cursor_created_at: str | None = None,
+    cursor_id: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` runs ordered `created_at DESC, id DESC`.
+    Keyset pagination: pass `(cursor_created_at, cursor_id)` from
+    the previous page's last row to fetch the next page."""
+
+    sql = (
+        "SELECT id, created_at, finished_at, status, outcome, outcome_detail, "
+        "       input_kind, input_name, project_name, branch_id "
+        "FROM runs "
+    )
+    where: list[str] = []
+    params: list[Any] = []
+    if status is not None:
+        where.append("status = ?")
+        params.append(status)
+    if cursor_created_at is not None and cursor_id is not None:
+        where.append("(created_at, id) < (?, ?)")
+        params.extend([cursor_created_at, cursor_id])
+    if where:
+        sql += "WHERE " + " AND ".join(where) + " "
+    sql += "ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    cur = await db.read_conn.execute(sql, params)
+    try:
+        rows = await cur.fetchall()
+    finally:
+        await cur.close()
+    return [
+        {
+            "id": r[0],
+            "created_at": r[1],
+            "finished_at": r[2],
+            "status": r[3],
+            "outcome": r[4],
+            "outcome_detail": r[5],
+            "input_kind": r[6],
+            "input_name": r[7],
+            "project_name": r[8],
+            "branch_id": r[9],
+        }
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# documents (one per PDF run)
+# ---------------------------------------------------------------------------
+
+
+async def insert_document(
+    db: Database,
+    *,
+    run_id: str,
+    filename: str,
+    sha256: str,
+    page_count: int,
+    stored_path: str,
+) -> None:
+    async with db.write() as conn:
+        await conn.execute(
+            """
+            INSERT INTO documents (run_id, filename, sha256, page_count, stored_path)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (run_id, filename, sha256, page_count, stored_path),
+        )
+
+
+async def get_document(db: Database, *, run_id: str) -> dict[str, Any] | None:
+    cur = await db.read_conn.execute(
+        "SELECT filename, sha256, page_count, stored_path FROM documents WHERE run_id = ?",
+        (run_id,),
+    )
+    try:
+        row = await cur.fetchone()
+    finally:
+        await cur.close()
+    if row is None:
+        return None
+    return {
+        "filename": row[0],
+        "sha256": row[1],
+        "page_count": row[2],
+        "stored_path": row[3],
+    }
+
+
+# ---------------------------------------------------------------------------
+# bids: latest-by-kind + current-draft helpers
+# ---------------------------------------------------------------------------
+
+
+async def get_bid(
+    db: Database, *, run_id: str, kind: str, revision: int | None = None
+) -> dict[str, Any] | None:
+    """Return the highest-revision bid of `kind` (or the exact
+    revision if given)."""
+
+    sql = (
+        "SELECT id, kind, revision, data_json, created_at, updated_at, finalized_at "
+        "FROM bids WHERE run_id = ? AND kind = ? "
+    )
+    params: list[Any] = [run_id, kind]
+    if revision is not None:
+        sql += "AND revision = ? "
+        params.append(revision)
+    sql += "ORDER BY revision DESC LIMIT 1"
+    cur = await db.read_conn.execute(sql, params)
+    try:
+        row = await cur.fetchone()
+    finally:
+        await cur.close()
+    if row is None:
+        return None
+    return {
+        "id": row[0],
+        "kind": row[1],
+        "revision": row[2],
+        "data": json.loads(row[3]),
+        "created_at": row[4],
+        "updated_at": row[5],
+        "finalized_at": row[6],
+    }
+
+
+class StaleRevisionConflict(Exception):
+    """Raised inside `apply_patch_atomically` when the current
+    draft revision doesn't match the caller's `draft_revision`.
+    The API layer catches it and renders `409 stale_revision`.
+    `current` carries the server's current draft so the client
+    can reconcile without a second round-trip."""
+
+    def __init__(self, current: dict[str, Any]) -> None:
+        self.current = current
+        super().__init__("stale_revision")
+
+
+async def apply_patch_atomically(
+    db: Database,
+    *,
+    run_id: str,
+    expected_draft_revision: int,
+    apply: Callable[[dict[str, Any]], tuple[dict[str, Any], list[dict[str, Any]]]],
+    created_at: str,
+) -> dict[str, Any]:
+    """Atomic edit: inside ONE `db.write()` transaction, read the
+    current draft, compare revisions, apply the ops, replace the
+    draft row, and append audit rows. Two concurrent PATCHes on
+    the same revision serialise behind `db.write()`'s lock — the
+    second one sees the bumped revision and raises
+    `StaleRevisionConflict`.
+
+    `apply(current_data) → (new_data, audit_ops)` is the pure
+    edit step — `bid/edits.apply_edits` composed around it.
+    """
+
+    async with db.write() as conn:
+        cur = await conn.execute(
+            """
+            SELECT revision, data_json
+            FROM bids
+            WHERE run_id = ? AND kind = 'draft'
+            ORDER BY revision DESC
+            LIMIT 1
+            """,
+            (run_id,),
+        )
+        try:
+            row = await cur.fetchone()
+        finally:
+            await cur.close()
+        if row is None:
+            # Caller validated existence upstream; reaching here
+            # means the draft was deleted between get_bid and
+            # the write — treat it as stale with an empty current.
+            raise StaleRevisionConflict({"missing": True})
+        current_rev = int(row[0])
+        current_data = json.loads(row[1])
+        if current_rev != expected_draft_revision:
+            raise StaleRevisionConflict(current_data)
+
+        new_data, audit_ops = apply(current_data)
+        new_rev = int(new_data["revision"])
+
+        await conn.execute("DELETE FROM bids WHERE run_id = ? AND kind = 'draft'", (run_id,))
+        await _insert_bid(
+            conn,
+            bid_id=f"bid_{run_id}_draft_{new_rev}_{__import__('secrets').token_hex(4)}",
+            run_id=run_id,
+            kind=BidKind.draft,
+            revision=new_rev,
+            data=new_data,
+            created_at=created_at,
+        )
+        for op in audit_ops:
+            await _insert_bid_edit(
+                conn,
+                run_id=run_id,
+                revision=new_rev,
+                op=op,
+                created_at=created_at,
+            )
+        return new_data
+
+
+async def insert_final_bid(
+    db: Database,
+    *,
+    run_id: str,
+    final: dict[str, Any],
+    created_at: str,
+    finalized_at: str,
+) -> None:
+    """Write the immutable `kind='final'` row. `id` is
+    `bid_<run_id>_final_<rev>_<nonce>` so it stays globally
+    unique. DB triggers reject UPDATE/DELETE on agent + final
+    rows."""
+
+    import secrets as _secrets
+
+    async with db.write() as conn:
+        await _insert_bid(
+            conn,
+            bid_id=f"bid_{run_id}_final_{final['revision']}_{_secrets.token_hex(4)}",
+            run_id=run_id,
+            kind=BidKind.final,
+            revision=int(final["revision"]),
+            data=final,
+            created_at=created_at,
+            finalized_at=finalized_at,
         )

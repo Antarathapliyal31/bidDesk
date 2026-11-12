@@ -738,12 +738,18 @@ def _fallback_summary(partial_reasons: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def new_bid_id(kind: BidKind, revision: int) -> str:
-    """Stable-ish bid id for the row. No per-run uniqueness
-    constraint — the DB has `UNIQUE(run_id, kind, revision)` and
-    callers rely on it."""
+def new_bid_id(kind: BidKind, revision: int, run_id: str | None = None) -> str:
+    """Globally-unique bid id for `bids.id` (PRIMARY KEY). The DB
+    additionally has `UNIQUE(run_id, kind, revision)`.
 
-    return f"bid_{kind.value}_{revision}_{secrets.token_hex(4)}"
+    Shape: `bid_<run>_<kind>_<rev>_<nonce>`. The nonce guarantees
+    uniqueness across any retry path; the embedded `run_id` keeps
+    collisions impossible across concurrent runs that happen to
+    pick the same revision number.
+    """
+
+    run_part = f"_{run_id}" if run_id else ""
+    return f"bid{run_part}_{kind.value}_{revision}_{secrets.token_hex(4)}"
 
 
 def now_iso() -> str:

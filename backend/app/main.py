@@ -19,10 +19,12 @@ from fastapi import FastAPI
 
 from app.api import branches as branches_router
 from app.api import meta as meta_router
+from app.api import runs as runs_router
 from app.api.errors import install_exception_handlers
 from app.config import get_settings
 from app.db.init import open_app_db
 from app.runtime.events import EventBus, emit_interrupted_run_finished
+from app.runtime.runner import RunRegistry
 
 
 def _now_iso() -> str:
@@ -49,10 +51,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     ):
         bus = EventBus(database)
         await emit_interrupted_run_finished(bus, interrupted_ids)
+        registry = RunRegistry()
         app.state.db = database
         app.state.bus = bus
         app.state.settings = settings
-        yield
+        app.state.run_registry = registry
+        try:
+            yield
+        finally:
+            # Shutdown: cancel in-flight pipelines. Rows + events
+            # survive; next startup flips them to `interrupted`.
+            await registry.cancel_all()
 
 
 def create_app() -> FastAPI:
@@ -66,6 +75,7 @@ def create_app() -> FastAPI:
 
     app.include_router(branches_router.router)
     app.include_router(meta_router.router)
+    app.include_router(runs_router.router)
     return app
 
 

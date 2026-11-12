@@ -342,7 +342,12 @@ async def run_pricing_loop(
             tools=tools,
             tool_choice={"type": "auto"},
         )
-        budget.charge(turns=1)
+        # Sub-agent pricing loops are bounded by tokens + deadline,
+        # NOT the orchestrator turn counter (DECISIONS: Phase-5b
+        # budget split). `budget.assert_alive()` at the top of each
+        # step still catches a hard overflow if the shared limits
+        # trip mid-run.
+        _ = budget
 
         submit_input = _find_submit_matches(response)
         if submit_input is not None:

@@ -61,6 +61,9 @@ class Budget:
     turns=0 is passed.
     """
 
+    # `turns` is the ORCHESTRATOR turn cap only (Phase 5b budget
+    # split). Sub-agents (analyst, pricing) are capped by
+    # `tokens` + `deadline_s`; they do not charge `turns`.
     turns: int
     tokens: int
     deadline_s: float

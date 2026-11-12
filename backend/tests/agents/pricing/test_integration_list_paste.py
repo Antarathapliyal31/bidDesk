@@ -195,8 +195,12 @@ class TestListPasteBatch:
                 # no assumption on matchable, text, no pint).
                 assert r.priced.confidence == "high"
 
-            # Budget reflects the turns spent (one per scripted response).
-            assert budget.snapshot()["turns"] >= len(items) + 1
+            # Phase-5b budget split: pricing's internal loop no
+            # longer charges `turns` (orchestrator-only counter).
+            # Tokens are charged by AnthropicLLM.call; FakeLLM
+            # here doesn't carry a usage attribute, so tokens
+            # stay at 0 too. Just assert the budget stayed alive.
+            budget.assert_alive()
         finally:
             unregister_all()
 

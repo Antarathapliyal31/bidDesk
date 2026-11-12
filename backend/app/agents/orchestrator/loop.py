@@ -688,8 +688,8 @@ async def run_orchestrator(
     agent_bid_id: str | None = None
     draft_bid_id: str | None = None
     if result.agent_bid is not None and result.draft_bid is not None:
-        agent_bid_id = new_bid_id(BidKind.agent, 0)
-        draft_bid_id = new_bid_id(BidKind.draft, 1)
+        agent_bid_id = new_bid_id(BidKind.agent, 0, run_id=run_id)
+        draft_bid_id = new_bid_id(BidKind.draft, 1, run_id=run_id)
         created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
         async with db.write() as conn:
             await repo._insert_bid(

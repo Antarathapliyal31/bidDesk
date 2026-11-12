@@ -166,11 +166,14 @@ async def _run_once() -> dict[str, Any]:
         app_db = Path(td) / "app.db"
         async with open_app_db(app_db, now_iso=_FIXED_NOW) as (db, _):
             bus = EventBus(db)
-            # Run-level turn budget is intentionally higher than
-            # `MAX_ORCHESTRATOR_TURNS` — pricing-agent + analyst
-            # loops also charge turns against the same counter, so
-            # 16 orchestrator turns can easily see 40+ total.
-            budget = Budget(turns=80, tokens=400_000, deadline_s=240.0)
+            # Phase-5b budget split: `turns` is the orchestrator
+            # turn cap ONLY. Sub-agents (analyst, pricing) are
+            # bounded by `tokens` + `deadline_s`.
+            budget = Budget(
+                turns=MAX_ORCHESTRATOR_TURNS,
+                tokens=400_000,
+                deadline_s=240.0,
+            )
             budget.start()
             run_id = "run_smoke_orch"
             await repo.insert_run(
