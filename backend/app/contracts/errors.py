@@ -44,6 +44,12 @@ class ErrorCode(StrEnum):
     run_not_found = "run_not_found"
     stale_revision = "stale_revision"
     open_flags = "open_flags"
+    # Server-emittable catch-all for unhandled exceptions (HTTP 500).
+    # The frontend maps ANY 500 response to `server_error` locally
+    # (DECISIONS: one coordinated change across SPEC §13 + contracts +
+    # http handler + frontend), so the body stays well-formed envelope
+    # shape but the UI still routes to the `server_error` branch.
+    internal_error = "internal_error"
     # Client-synthesized; the server never raises these.
     network_error = "network_error"
     server_error = "server_error"
@@ -64,6 +70,7 @@ _HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.run_not_found: 404,
     ErrorCode.stale_revision: 409,
     ErrorCode.open_flags: 422,
+    ErrorCode.internal_error: 500,
 }
 
 # Codes the server is never allowed to raise (SPEC §13). The exception

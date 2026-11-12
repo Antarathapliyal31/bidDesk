@@ -61,6 +61,12 @@ ignore = ["E501"]  # line-length is enforced by `ruff format`, not by lint
 # BidLine test docstrings mirror the invariant text (× in math
 # identities); same justification.
 "tests/contracts/test_bid_line_invariants.py" = ["RUF001", "RUF002", "RUF003"]
+# Analyst verify.py deliberately rewrites unicode quotes / dashes /
+# fractions (NFKC, curly→straight, en/em→hyphen) as part of the
+# quote-match normalizer. RUF would flag the source characters.
+"app/agents/analyst/verify.py" = ["RUF001", "RUF003"]
+# Routing test uses an en-dash on purpose to exercise normalization.
+"tests/agents/analyst/test_verify.py" = ["RUF001"]
 # Sample content uses the unicode × multiplication sign too (lumber
 # dimensions in the mock RFPs); same justification.
 "../samples/make_samples.py" = ["RUF001", "RUF003"]

@@ -31,6 +31,12 @@ export const API_ERROR_MESSAGES = {
   run_not_found: "That run doesn't exist anymore.",
   stale_revision: "This bid changed somewhere else. Reload and try again.",
   open_flags: "There are review flags open. Resolve them before finalizing.",
+  // `internal_error` is the backend's HTTP 500 code (SPEC §13).
+  // `apiErrorFromResponse` folds any 500 into `server_error` before
+  // messages ever see this key, so this entry is just type-level
+  // parity — if it ever surfaces (e.g. a hand-constructed ApiError),
+  // we still have the canonical server-side message.
+  internal_error: "Something went wrong on our end.",
   network_error: "Can't reach the server — check your connection.",
   server_error: "Something went wrong on our side. Try again in a moment.",
 } as const;

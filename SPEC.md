@@ -1151,8 +1151,9 @@ Unit tests never call the real Anthropic API. Use `FakeLLM` (scripted responses 
 | `run_not_found` | 404 | Run id unknown or its uploads were purged. |
 | `stale_revision` | 409 | `draft_revision` doesn't match server (§9.4). `details.current` carries the server's current Bid. |
 | `open_flags` | 422 | Finalize blocked by unresolved review lines (§9.6). `details.open_line_ids: string[]`. |
+| `internal_error` | 500 | Server-emittable catch-all for unhandled exceptions. Body is a well-formed envelope with a generic message and no `details`; no traceback / file paths / raw exception string leaks over the wire. The frontend maps **any** HTTP 500 response to `server_error` locally — one coordinated change across SPEC §13 + backend contracts + the FastAPI unhandled-exception handler + `apiErrorFromResponse`. |
 | `network_error` | 0 | **Client-synthesized; never emitted by the server.** Produced locally when `fetch` rejects (no response reached the client). |
-| `server_error` | varies | **Client-synthesized; never emitted by the server.** Client fallback when the response isn't a well-formed envelope (HTML 500, unknown `code`). `details.raw_code: string|null` carries the original unknown code so the backend can patch the enum. |
+| `server_error` | varies | **Client-synthesized; never emitted by the server.** Client fallback when the response isn't a well-formed envelope (HTML 500, unknown `code`) OR any HTTP 500 regardless of envelope. `details.raw_code: string|null` carries the original unknown code so the backend can patch the enum. |
 
 ---
 

@@ -23,8 +23,7 @@ from app.contracts import BidKind, InputKind
 from app.db import repo
 from app.db.init import Database
 from app.db.repo import _insert_bid_edit, _insert_run
-
-from .conftest import seed_run
+from tests._seeds import seed_run
 
 _NOW = "2026-11-11T12:00:00+00:00"
 

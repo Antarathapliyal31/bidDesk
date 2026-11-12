@@ -477,6 +477,51 @@ discriminated union. The styling and copy need to differ enough
 from `failed` that estimators don't confuse them; the design
 tokens include a neutral "interrupted" color for this.
 
+## 20. Extraction batching (>30 pages) deferred — 2026-11-11
+Decision: `extract_items` makes ONE LLM call for the whole
+document, regardless of page count. SPEC §6.3's batched path —
+5-page chunks with 1-page overlap, `asyncio.gather` with
+semaphore=3, dedupe by `(page, normalized quote)` — is designed
+(see "Planned design" below) but NOT implemented and NOT
+scheduled to a specific future phase. The sample PDFs
+(`rfp_clean` 3p, `rfp_messy` 8p, `rfp_scanned` 3p) all fit
+comfortably under the 30-page `SINGLE_CALL_MAX_PAGES` ceiling,
+so the one-call path is correct for the demo.
+Because: The batching machinery is ~200 LOC of concurrency +
+deduplication + `max_tokens` recovery (§6.3 says re-run remaining
+pages in batches if a single call hits `stop_reason='max_tokens'`).
+Writing it without a >30-page fixture to drive would be guessing;
+the demo's three sample PDFs don't exercise it.
+Alternatives considered: Implement batching speculatively now
+(risk of untested code shipping); fail-fast at 30 pages (would
+break the ingest for a real RFP without warning — SPEC caps at
+60 pages, so the gap is real).
+Trade-off / known downside: A real-world >30-page RFP today
+sends one oversized prompt. The SDK will raise a non-retryable
+4xx (context length exceeded); `delegate()` records that as
+`AgentResult(status="failed", errors=[AgentError(kind="transport",
+code="BadRequestError", ...)])`; `ask_document_analyst` raises
+`RuntimeError`; the HTTP layer surfaces that as a generic 500 →
+the frontend renders its `server_error` message. The user does
+NOT see a "try a shorter PDF" hint — they see the generic
+"Something went wrong on our end" copy. Fixing that message is
+part of whatever work lands the real batching.
+
+**Planned design (deferred):**
+  - Split pages into chunks of 5 with 1-page overlap:
+    `[(1..5), (5..10), (10..15), ...]`.
+  - `asyncio.gather` with `asyncio.Semaphore(3)` so three batches
+    run in parallel without overwhelming the Anthropic rate limit.
+  - Each batch's `report_extraction` payload keeps its `source_page`,
+    so merging is `{(page, normalized_quote): item}` — the 1-page
+    overlap means a boundary item appears in two batches with the
+    same key, and the dedupe keeps one copy deterministically.
+  - If a batch returns `stop_reason='max_tokens'`, discard that
+    batch's items and re-chunk its page range into 3-page subchunks
+    with 1-page overlap. Keeps bounded recursion depth.
+  - Trace: one `span.extraction.batch` per batch, parent is the
+    `delegate.document_analyst` span. The timeline shows the fan-out.
+
 ---
 
 ## Frontend entries (F1–F5)

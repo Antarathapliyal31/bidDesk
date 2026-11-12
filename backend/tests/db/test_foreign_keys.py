@@ -24,8 +24,7 @@ import pytest
 from app.contracts import RequirementView, SourceRef
 from app.db import repo
 from app.db.init import Database
-
-from .conftest import seed_run, seed_run_and_item
+from tests._seeds import seed_run, seed_run_and_item
 
 _NOW = "2026-11-11T12:00:00+00:00"
 

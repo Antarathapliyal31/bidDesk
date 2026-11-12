@@ -8,6 +8,13 @@
  * threw; no response arrived). `network_error` is the code for that
  * case; `server_error` is the catch-all for anything else that
  * wasn't a well-formed envelope (HTML 500 pages, unknown codes).
+ *
+ * `internal_error` is the SERVER-emitted code on HTTP 500 (added to
+ * SPEC §13 in Phase 2). It's listed here for cross-layer parity
+ * with the backend contract, but `apiErrorFromResponse` folds any
+ * HTTP 500 into `server_error` locally so the UI only ever needs
+ * one 500-shaped error state — the backend's `internal_error` body
+ * is captured in `details.raw_code` for logs.
  */
 export type ApiErrorCode =
   | "invalid_input"
@@ -22,6 +29,7 @@ export type ApiErrorCode =
   | "run_not_found"
   | "stale_revision"
   | "open_flags"
+  | "internal_error"
   | "network_error"
   | "server_error";
 
@@ -38,6 +46,7 @@ const KNOWN_CODES = new Set<ApiErrorCode>([
   "run_not_found",
   "stale_revision",
   "open_flags",
+  "internal_error",
   "network_error",
   "server_error",
 ]);
@@ -81,9 +90,41 @@ export function isApiError(e: unknown): e is ApiError {
 export async function apiErrorFromResponse(res: Response): Promise<ApiError> {
   const status = res.status;
   let body: unknown;
+  let parsedOk = true;
   try {
     body = await res.json();
   } catch {
+    parsedOk = false;
+  }
+
+  // Any HTTP 500 → server_error locally, regardless of the
+  // backend's envelope code (SPEC §13 coordinated change: the
+  // server emits `internal_error` on 500; the UI collapses that
+  // into the one 500-shaped error state). `details.raw_code`
+  // preserves the backend code for logs so a mis-mapping is
+  // still diagnosable.
+  if (status === 500) {
+    let rawCode: string | null = null;
+    let message = "Something went wrong on our end.";
+    if (
+      parsedOk &&
+      body &&
+      typeof body === "object" &&
+      "error" in body &&
+      body.error &&
+      typeof body.error === "object"
+    ) {
+      const env = (body as { error: unknown }).error as {
+        code?: unknown;
+        message?: unknown;
+      };
+      if (typeof env.code === "string") rawCode = env.code;
+      if (typeof env.message === "string") message = env.message;
+    }
+    return new ApiError("server_error", message, status, { raw_code: rawCode });
+  }
+
+  if (!parsedOk) {
     // Bare HTTP 413 (Payload Too Large) — common from edge
     // layers / reverse proxies that reject the request before
     // the app ever sees it, so there's no envelope.
