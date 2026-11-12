@@ -236,7 +236,7 @@ function computeOpenFlags(extractedItems: Iterable<ItemView>): number {
 
 // ─── Extracted items (28 lines in rfp_messy — 26 items + 2 skipped nulls) ─
 
-const EXTRACTED_PAYLOADS: ItemView[] = [
+export const EXTRACTED_PAYLOADS: ItemView[] = [
   { id: "item_1", kind: "material", description: "2x4 x 8' SPF #2",
     quantity_text: "100", unit_raw: "pcs",
     source: src(2, "1. (100) 2x4 x 8' SPF #2"), notes: [] },
@@ -245,15 +245,22 @@ const EXTRACTED_PAYLOADS: ItemView[] = [
     source: src(2, "2. (40) 2x6 x 16' pressure-treated"), notes: [] },
   { id: "item_3", kind: "material", description: "2x10 x 17' SPF",
     quantity_text: "20", unit_raw: "pcs",
+    // Matches samples/expected/rfp_messy.json verbatim (the PDF
+    // has double spaces around the em dash; the analyst normalizes
+    // to single spaces — either form highlights the same line via
+    // normalizeQuote's whitespace collapse).
     source: src(2, "3. Qty: 20 — 2x10 x 17' SPF"), notes: [] },
   { id: "item_4", kind: "material", description: "4x4 x 8' SPF #2 (ground contact)",
     quantity_text: "20", unit_raw: "pcs",
     source: src(2, "4. twenty (20) 4x4 x 8' SPF #2 (ground contact)"), notes: [] },
-  // item_5 quote extended to carry the quantity + unit so the
-  // analyst's quantity-in-quote check (SPEC §6.4 bullet 2) passes.
+  // Item 5 is wrapped across two lines in the PDF (see
+  // make_samples.py page-2 block). The verbatim quote preserves
+  // both lines so the SourcePanel's customTextRenderer highlights
+  // the full row, not just the first wrap. The analyst's quantity-
+  // in-quote check (SPEC §6.4 bullet 2) sees "12 LF" at the end.
   { id: "item_5", kind: "material", description: "2x6 PT for sill plates on the concrete slab",
     quantity_text: "12", unit_raw: "LF",
-    source: src(2, "12 LF — 2x6 PT for sill plates on the concrete slab"), notes: [] },
+    source: src(2, "5. 2x6 PT for sill plates on the concrete slab ................... 12 LF"), notes: [] },
   { id: "item_6", kind: "material", description: "2x8 x 12' SPF",
     quantity_text: "20", unit_raw: "pcs",
     source: src(3, "6. 2x8 x 12' SPF .................................. 20 pcs"), notes: [] },

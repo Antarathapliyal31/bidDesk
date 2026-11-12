@@ -47,13 +47,65 @@ function SelectTrigger({
   )
 }
 
+/**
+ * If the body has been locked with `pointer-events: none` AND no
+ * other Radix modal (Dialog / AlertDialog) is open, release the
+ * lock. If a Dialog IS open, leave the lock alone — it owns the
+ * lock and will release it on its own close.
+ *
+ * Detection: Radix Dialog mounts its content with `role="dialog"`
+ * (AlertDialog with `role="alertdialog"`). While open, the content
+ * is in the DOM; on close it unmounts. A `querySelector` for
+ * either role answers "is any Radix modal visible right now?".
+ */
+function maybeReleaseBodyPointerLock(): void {
+  if (typeof document === "undefined") return;
+  if (document.body.style.pointerEvents !== "none") return;
+  const openModal = document.querySelector('[role="dialog"], [role="alertdialog"]');
+  if (openModal !== null) return;
+  document.body.style.pointerEvents = "";
+}
+
 function SelectContent({
   className,
   children,
   position = "item-aligned",
   align = "center",
+  onPointerDown,
+  onKeyDown,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {
+  // Track whether the Select is closing because of a pointer
+  // interaction (click on an item) vs a keyboard interaction
+  // (Enter/Space on an item, or Escape). Pointer-initiated closes
+  // skip the auto-focus-return to the trigger — otherwise the
+  // first outside click (e.g. Run) is absorbed by Radix's brief
+  // body pointer-events lock (radix-ui #1859). Keyboard closes
+  // keep the default focus-return so Tab order stays sane.
+  const closedByPointerRef = React.useRef(false);
+
+  // Belt-and-suspenders fix for the same issue (radix-ui #1859):
+  // when the Select content unmounts after a close, make sure the
+  // body isn't left with `pointer-events: none`. In jsdom this
+  // never triggers (Radix doesn't set the lock), but in real
+  // Chrome / Safari the user's next click would land during the
+  // brief window and get swallowed. The `onCloseAutoFocus`
+  // override alone isn't enough — Radix sets the body style
+  // during scroll-lock, not during focus restore — so we clean
+  // up here regardless of the close path.
+  //
+  // Guard: only reset if no other Radix modal (Dialog / AlertDialog)
+  // is currently open. If a Dialog is open, it legitimately needs
+  // the body pointer-events lock — stealing it here would unlock
+  // outside interaction while the Dialog still demands focus
+  // containment. Radix Dialog will release the lock itself when it
+  // closes.
+  React.useEffect(() => {
+    return () => {
+      maybeReleaseBodyPointerLock();
+    };
+  }, []);
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
@@ -66,6 +118,30 @@ function SelectContent({
         )}
         position={position}
         align={align}
+        onPointerDown={(e) => {
+          closedByPointerRef.current = true;
+          onPointerDown?.(e);
+        }}
+        onKeyDown={(e) => {
+          closedByPointerRef.current = false;
+          onKeyDown?.(e);
+        }}
+        onCloseAutoFocus={(e) => {
+          // Pointer close: skip focus-return so the next click
+          // outside isn't absorbed by the brief
+          // `pointer-events: none` window.
+          // Keyboard close: let Radix's default run so focus
+          // returns to the trigger (standard accessibility behavior).
+          if (closedByPointerRef.current) e.preventDefault();
+          closedByPointerRef.current = false;
+          // Nudge body pointer-events back now (the useEffect
+          // cleanup runs AFTER unmount on the next tick; this
+          // closes the window where Chrome's compositor picks
+          // the "none" value for a pending pointerdown). Guarded
+          // the same way as the unmount cleanup — see below.
+          maybeReleaseBodyPointerLock();
+          onCloseAutoFocus?.(e);
+        }}
         {...props}
       >
         <SelectScrollUpButton />

@@ -5,22 +5,26 @@ import type { FxSampleInput } from "./types";
  * carry `file_url` that `frontend/public/samples/` serves (see that
  * directory's README); the paste variant carries `text` for the
  * form's textarea.
+ *
+ * Item counts in `size_label` must match
+ * `samples/expected/*.json` — a mismatch means the card's promise
+ * doesn't line up with what the stream + priced bid will show.
  */
 export const FIXTURE_SAMPLES: FxSampleInput[] = [
   {
     kind: "pdf",
     key: "clean",
     name: "rfp_clean.pdf",
-    description: "Text PDF, ~15 items, no conflicts. The happy path.",
-    size_label: "3 pages",
+    description: "Text PDF, no conflicts. The happy path.",
+    size_label: "3 pages · 14 items",
     file_url: "/samples/rfp_clean.pdf",
   },
   {
     kind: "pdf",
     key: "messy",
     name: "rfp_messy.pdf",
-    description: "Text PDF, ~30 items. Planted conflicts, gaps, yards, injection line.",
-    size_label: "8 pages",
+    description: "Text PDF with planted conflicts, gaps, yards, and an injection line.",
+    size_label: "8 pages · 26 items",
     file_url: "/samples/rfp_messy.pdf",
   },
   {
@@ -28,15 +32,15 @@ export const FIXTURE_SAMPLES: FxSampleInput[] = [
     key: "scanned",
     name: "rfp_scanned.pdf",
     description: "Image-only version of rfp_clean — exercises the vision path.",
-    size_label: "3 pages",
+    size_label: "3 pages · 14 items",
     file_url: "/samples/rfp_scanned.pdf",
   },
   {
     kind: "paste",
     key: "paste",
     name: "list_paste.txt",
-    description: "Short pasted list (~10 items) with abbreviations like LF, SQ, SHT.",
-    size_label: "10 lines",
+    description: "Short pasted list with abbreviations like LF, SQ, SHT.",
+    size_label: "10 items",
     text: [
       "(40) 2x6x16 PT #2",
       "12 SHT OSB 7/16",

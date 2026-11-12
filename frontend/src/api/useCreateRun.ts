@@ -69,7 +69,10 @@ export function useCreateRun() {
       // The result is ignored in fixture mode but kept so a typo in
       // the builder fails here, not after the swap.
       toCreateRunFormData(payload);
-      return withDelay({ run_id: "run_demo_a1" }, 800);
+      // Fixture mode: every submit lands on the rfp_messy scripted
+      // stream (see dev-fixtures/sse/index.ts). RunPage marks the
+      // run with a "Demo data" chip because the stream is reused.
+      return withDelay({ run_id: "run_demo_messy" }, 800);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["runs"] });

@@ -23,11 +23,44 @@ export type {
   SourceRef,
   TransferOption,
 } from "./events";
+export type {
+  Bid,
+  BidDiff,
+  BidKind,
+  BidLine,
+  BidTotals,
+  Confidence,
+  ContractorQuestionView,
+  AssumptionView,
+  ExclusionLine,
+  LaborLine,
+  UnreadableLine,
+  EditOp,
+  SetQuantityOp,
+  SetUnitPriceOp,
+  SetSkuOp,
+  SetDescriptionOp,
+  AcceptLineOp,
+  DeleteLineOp,
+  AddLineOp,
+  ApplyRepriceOp,
+  MatchInfo,
+  MatchStatus,
+  MatchAssumption,
+  Origin,
+  RepriceProposal,
+  RequirementView,
+  ReviewReasonCode,
+  ReviewState,
+  StockInfo,
+} from "./bid";
 export {
+  isReusedStream,
   useRunStream,
   type UseRunStreamOptions,
   type UseRunStreamResult,
 } from "./useRunStream";
+export { useBidDraft, type UseBidDraftResult } from "./useBidDraft";
 export { useBranches, type Branch } from "./useBranches";
 export {
   useCreateRun,
@@ -35,6 +68,7 @@ export {
   type CreateRunPayload,
   type CreateRunResult,
 } from "./useCreateRun";
+export { useRunSummary, type RunSummary as RunSummaryDetail } from "./useRunSummary";
 export { useSamples, type Sample } from "./useSamples";
 export { useFaults, type Fault, type FaultKey, type FaultsMeta } from "./useFaults";
 export {

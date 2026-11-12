@@ -1,22 +1,23 @@
 import { FilePlusIcon, HistoryIcon, KeyboardIcon } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
+import { useRuns, type RunStatus } from "@/api";
 import { Kbd } from "@/components/Kbd";
 import { cn } from "@/lib/utils";
 
 import { useShortcutsSheet } from "./ShortcutsContext";
 
 /**
- * Left sidebar: brand, primary nav, a recent-runs placeholder (fed
- * by the real run list in Phase 7), and a footer with a *clickable*
- * "Keyboard shortcuts" item that opens the shortcuts sheet.
+ * Left sidebar: brand, primary nav, the five most recent runs
+ * (fed by `useRuns()` — same query the History page uses, so the
+ * cache is shared), and a clickable "Keyboard shortcuts" footer.
  *
  * Landmark: the outer container is a plain <div>; the navigation
  * role lives on the inner <nav aria-label="Primary">. Active links
  * get a 2px primary indicator plus font-semibold so active and hover
  * never look identical (hover uses bg-accent/60).
  *
- * The <ul> carries role="list" because Safari/VoiceOver drops list
+ * The <ul>s carry role="list" because Safari/VoiceOver drops list
  * semantics when `list-style: none` is applied (which Tailwind's
  * reset does).
  */
@@ -25,8 +26,30 @@ const NAV = [
   { to: "/runs", label: "History", icon: HistoryIcon },
 ] as const;
 
+const DOT_CLASS: Record<RunStatus, string> = {
+  running: "bg-run-blue",
+  completed: "bg-done-green",
+  partial: "bg-warn-amber",
+  failed: "bg-fail-red",
+  interrupted: "bg-zinc-400",
+};
+
+function StatusDot({ status }: { status: RunStatus }) {
+  return (
+    <span
+      className={cn("size-2 shrink-0 rounded-full", DOT_CLASS[status])}
+      aria-label={status}
+      title={status}
+    />
+  );
+}
+
 export function Sidebar() {
   const { setOpen: openShortcuts } = useShortcutsSheet();
+  const runsQuery = useRuns();
+  const allRuns = runsQuery.data?.pages.flatMap((p) => p.items) ?? [];
+  const recent = allRuns.slice(0, 5);
+
   return (
     <div className="flex w-60 shrink-0 flex-col border-r border-border bg-card">
       <div className="flex h-14 items-center gap-2 border-b border-border px-4">
@@ -76,9 +99,38 @@ export function Sidebar() {
         Recent runs
       </h2>
       <div className="flex-1 overflow-y-auto px-2">
-        <p className="px-2.5 py-1.5 text-xs text-muted-foreground">
-          Runs will appear here after your first bid.
-        </p>
+        {runsQuery.isPending ? (
+          <p className="px-2.5 py-1.5 text-xs text-muted-foreground">Loading…</p>
+        ) : recent.length === 0 ? (
+          <p className="px-2.5 py-1.5 text-xs text-muted-foreground">
+            Runs will appear here after your first bid.
+          </p>
+        ) : (
+          <ul role="list" className="flex flex-col gap-0.5">
+            {recent.map((run) => {
+              const name = run.project_name ?? run.input_name;
+              return (
+                <li key={run.id}>
+                  <NavLink
+                    to={`/runs/${run.id}`}
+                    title={name}
+                    className={({ isActive }) =>
+                      cn(
+                        "flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs transition-colors",
+                        isActive
+                          ? "bg-accent text-foreground"
+                          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                      )
+                    }
+                  >
+                    <StatusDot status={run.status} />
+                    <span className="truncate">{name}</span>
+                  </NavLink>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
 
       <div className="border-t border-border p-2">

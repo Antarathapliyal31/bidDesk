@@ -21,6 +21,28 @@ export function formatTaxRate(ppm: number): string {
 }
 
 /**
+ * Format a file size in bytes with units that scale by magnitude.
+ * Under 1 MiB → KB ("320 KB"); 1 MiB and up → one-decimal MB
+ * ("1.2 MB"). Avoids the "0.0 MB" output a fixed-MB formatter
+ * produces for ~hundreds-of-KB uploads.
+ *
+ * Binary units (1024-based) match `MAX_UPLOAD_BYTES` in `limits.ts`
+ * — see DECISIONS #… / lib/limits.ts for why we picked MiB over MB.
+ */
+export function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  const KB = 1024;
+  const MB = KB * 1024;
+  if (bytes < MB) {
+    // Round to the nearest whole KB — sub-KB resolution isn't
+    // meaningful at this scale. 0 bytes → "0 KB" (still a valid
+    // size string; the empty-file validator catches the real case).
+    return `${Math.max(0, Math.round(bytes / KB))} KB`;
+  }
+  return `${(bytes / MB).toFixed(1)} MB`;
+}
+
+/**
  * Short date string for history rows. Explicit `en-US` locale +
  * UTC time zone so test snapshots don't drift with the host
  * machine's region. "2026-11-09T19:41:03Z" → "Nov 9, 2026".
