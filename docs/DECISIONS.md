@@ -960,6 +960,70 @@ PDFs. The chip makes this explicit; the test
 renders the Live view"). Phase 5 merge deletes the fallback
 along with the SSE registry and `pdfRunUrl.ts`.
 
+## F11. Frontend wired to the real backend (hookup branch) — 2026-11-12
+
+Decision: Promote every data hook off its fixture `queryFn` and
+onto the real backend over the Vite proxy. `VITE_FIXTURES=1` keeps
+the fixture path alive for the vitest suite and Playwright e2e.
+
+Path map (all exist in `frontend/openapi.json`):
+- `useCreateRun` → `POST /api/runs`
+- `useRuns` → `GET /api/runs`
+- `useRunSummary`, `useBidDraft` initial fetch → `GET /api/runs/{id}` (nested `input/project/branch`, flattened at the hook boundary)
+- `useRunStream` → `EventSource('/api/runs/{id}/stream')` — one connection does replay + live; no separate `/events` call (would double-deliver)
+- `useBidDraft` save → `PATCH /api/runs/{id}/bid` (409 `stale_revision` reseeds the reducer from `details.current`)
+- `useBidDraft` finalize → `POST /api/runs/{id}/bid/finalize`
+- `useBranches` → `GET /api/branches`
+- `useFaults` → `GET /api/meta` (maps `demo_faults_enabled` → `enabled`)
+- `pdfRunUrl` → `GET /api/runs/{id}/source.pdf`
+
+Contract files: `make gen-api` dumps `FastAPI.openapi()` →
+`frontend/openapi.json` → `openapi-typescript` →
+`frontend/src/api/schema.gen.ts`. `make check-contract` regenerates
+to scratch files and fails on drift.
+
+Response typing — honest status: request bodies, path parameters,
+and operation names are generated from OpenAPI; **response shapes
+are still hand-typed** in `src/api/bid.ts`, `src/api/events.ts`,
+and a few hook-local interfaces (`RunDetailResponse`,
+`MetaResponse`) because the backend's `GET` routes return
+`dict[str, object]` without `response_model=`. The schema.gen
+generator sees those as `{ [key: string]: unknown }`, so there's
+nothing yet to pin against. Adding `response_model=` to each
+backend `GET` is the next step and will let the hand-written types
+shrink to thin pass-throughs.
+
+Dep add: `openapi-typescript@7.13.0` as a frontend devDependency.
+Its TypeScript peer is `^5` while this project is on TS 6, so
+`package.json` carries an `"overrides"` entry resolving its TS
+peer to `$typescript` (the project's TS 6). Verified clean
+install: `rm -rf node_modules && npm ci` succeeds with no
+ERESOLVE. Upstream TS 6 support isn't released yet; revisit the
+override when `openapi-typescript` publishes a version that lists
+TS 6 as a supported peer.
+
+Because: the backend is feature-complete for the frontend's needs
+(Phase 5b API + SSE + atomic PATCH + run-id-scoped bid ids). The
+`transition state` wording in README and the "Phase 5 merge
+deletes …" breadcrumbs in hook docstrings no longer match
+reality — the hooks ARE the merged state.
+
+F10 resolution: `BidLine.match.status === "needs_review"` renders
+the amber "Needs review" pill in `BidLineRow`'s `StatusChip`
+(Phase 8 already landed this). The matching `PricedLineView.status`
+union in `src/api/events.ts` now also includes `"needs_review"` and
+`ItemsStream.PricedCell` renders the same pill for the live view.
+A reducer test (`runReducer.test.ts` → "replay-then-live delivery
+with overlapping ids yields no duplicate state") locks the dedup
+invariant that lets us use one SSE connection for both replay and
+live without worrying about overlap.
+
+Trade-off: with the backend returning `dict[str, object]`, a
+backend-side shape change can land without a type error at the
+hook boundary. Mitigated at the user-visible surface (reducer
+validators, Zod on forms, test coverage), but the next step
+(adding `response_model=`) closes the gap.
+
 ---
 
 ## Superseded notes

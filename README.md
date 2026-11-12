@@ -29,11 +29,12 @@ make test       # runs backend pytest + frontend vitest
 make dev        # backend on :8000, frontend on :5173 (proxies /api -> :8000)
 ```
 
-Visit `http://localhost:5173`. The frontend runs in **fixture mode** by
-default (no network calls), so you can explore the UI without a running
-backend. `make dev` wires the proxy so real `/api/*` calls land on the
-Python server; the Phase-5 merge swaps every `useXxx` hook's fixture
-`queryFn` for a real `fetch`.
+Visit `http://localhost:5173`. In normal dev + prod builds, every
+`useXxx` hook calls the real backend through the Vite proxy
+(`/api/*` → `:8000`). Set `VITE_FIXTURES=1` to force the hooks onto
+the scripted fixture data instead — this is how the vitest suite
+and the Playwright e2e run without a backend, and how you can
+demo the UI if the Python server isn't up.
 
 Catalog prices in the seeded DB are **synthetic**. No real brand names
 are used; in production this seed is replaced by the supplier's
@@ -123,16 +124,17 @@ owns; see `docs/API_CONTRACT.md` for the HTTP shapes.
 
 ### Type-safety pipeline
 
-`make gen-api` runs `python -m app.export_openapi` →
-`frontend/openapi.json` → `npx openapi-typescript openapi.json
--o src/api/schema.gen.ts`. The frontend never hand-writes an
-API shape. `make check-contract` fails when the generated files
-are stale. TanStack Query hooks + Zod form schemas pin to the
-generated types via `satisfies z.ZodType<Components['schemas']['X']>`.
+`make gen-api` dumps `FastAPI.openapi()` to `frontend/openapi.json`
+then runs `openapi-typescript` → `frontend/src/api/schema.gen.ts`.
+Request bodies, path params, and operation names come from the
+generated file. `make check-contract` fails when either generated
+artefact drifts.
 
-Today's `frontend-phase7` branch is in a **transition state**:
-contract types live in `src/api/{bid,events}.ts` as hand-synced
-copies of the spec. The Phase-5 merge deletes them.
+The backend's `GET` routes don't yet declare `response_model=`, so
+the generated schema types responses as `{ [key: string]: unknown }`.
+Response shapes live in the hand-maintained `src/api/{bid,events}.ts`
+plus a few hook-local types (`RunDetailResponse`, `MetaResponse`)
+until the backend adds response models — see DECISIONS F11.
 
 ### Guardrail table
 
