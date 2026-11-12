@@ -16,7 +16,6 @@ import { FIXTURE_RUNS } from "@/dev-fixtures";
 import { historyRunEvents } from "@/dev-fixtures/sse";
 import { AgentLanes } from "@/features/run/AgentLanes";
 import { ItemsStream } from "@/features/run/ItemsStream";
-import { BidWorkspacePlaceholder } from "@/features/run/BidWorkspacePlaceholder";
 import { formatFileSize } from "@/lib/format";
 import { reasonCodeLabel } from "@/lib/reasonCodes";
 import {
@@ -178,70 +177,12 @@ describe("#9 AgentLanes display: idle + past span → Done", () => {
 });
 
 // ───────────────────────────────────────────────────────────────
-// #3 — Bid tab Priced lines = lines with a price, not total items
+// #3 — Bid tab Priced lines = lines with a price, not total items.
+// Now covered by tests/bidFixture.test.ts via `buildMessyBid`'s
+// `totals.priced_lines` (filters matched + substitute only). The
+// BidWorkspace renders the same `totals` object unchanged, so the
+// UI assertion would just duplicate that path.
 // ───────────────────────────────────────────────────────────────
-describe("#3 BidWorkspace Priced lines counter", () => {
-  function stateWithBidReady(): RunViewState {
-    let s: RunViewState = {
-      ...initialRunViewState,
-      bidReady: { revision: 0, generated_by: "orchestrator", open_flags: 2 },
-    };
-    // 3 matched + 1 substitute + 1 no_match + 1 skipped.
-    const addItem = (id: string, pricedStatus: string): void => {
-      s = {
-        ...s,
-        items: {
-          ...s.items,
-          [id]: {
-            id,
-            kind: "material",
-            description: id,
-            quantity_text: "1",
-            unit_raw: "pcs",
-            page: 1,
-            quote: null,
-            verified: true,
-            read_via: "text",
-            notes: [],
-            flags: [],
-            priced: {
-              item_id: id,
-              status: pricedStatus as "matched" | "substitute" | "no_match" | "skipped",
-              sku: null,
-              product_name: null,
-              sale_qty: "1",
-              sale_unit: "pcs",
-              unit_price_cents: 100,
-              extended_cents: 100,
-              confidence: "high",
-              confidence_reasons: [],
-              shortfall: null,
-              is_substitute: false,
-              substitute_reason: null,
-              conversion_path: null,
-            },
-          },
-        },
-        itemOrder: [...s.itemOrder, id],
-      };
-    };
-    addItem("a", "matched");
-    addItem("b", "matched");
-    addItem("c", "matched");
-    addItem("d", "substitute");
-    addItem("e", "no_match");
-    addItem("f", "skipped");
-    return s;
-  }
-
-  it("counts matched + substitute only (not no_match / skipped)", () => {
-    render(<BidWorkspacePlaceholder state={stateWithBidReady()} />);
-    const labels = screen.getAllByText(/^priced lines$/i);
-    expect(labels.length).toBeGreaterThan(0);
-    // 3 matched + 1 substitute = 4.
-    expect(screen.getByText("4")).toBeInTheDocument();
-  });
-});
 
 // ───────────────────────────────────────────────────────────────
 // #6 — Unit price + Ext. columns
@@ -389,16 +330,16 @@ describe("#1 History row → instant terminal state", () => {
     });
   }
 
-  it("completed finalized run (run_demo_b2) renders project title + priced count", async () => {
+  it("completed finalized run (run_demo_b2) renders project title + completed status", async () => {
     renderRun("run_demo_b2");
     await advanceRunSummary();
-    // Title = project_name (R6); input_name is now a subtitle.
+    // Title = project_name (R6); input_name is the subtitle.
     expect(screen.getByRole("heading", { level: 1, name: /oak ridge addition/i }))
       .toBeInTheDocument();
     expect(screen.getByText("rfp_clean.pdf")).toBeInTheDocument();
     expect(screen.getByText(/completed/i)).toBeInTheDocument();
-    // "Priced lines" card shows 15 (row.priced_lines).
-    expect(screen.getByText("15")).toBeInTheDocument();
+    // Priced-line counts are tested in tests/bidFixture.test.ts
+    // (totals.priced_lines in buildMessyBid).
   });
 
   it("partial run (run_demo_c3, Northside Remodel): partial status, 22 priced, 6 flags", async () => {

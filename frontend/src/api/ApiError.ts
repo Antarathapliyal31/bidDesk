@@ -23,7 +23,15 @@ export type ApiErrorCode =
   | "stale_revision"
   | "open_flags"
   | "network_error"
-  | "server_error";
+  | "server_error"
+  // SPEC §13 / Phase 8 review: the backend may surface an
+  // `internal_error` for unexpected 5xx cases that DO carry an
+  // envelope (vs `server_error` which is the client's fallback
+  // when the body isn't a well-formed envelope). Distinct codes
+  // make incident triage easier — a flood of `internal_error`
+  // means the server is throwing; a flood of `server_error`
+  // means something upstream is stripping envelopes.
+  | "internal_error";
 
 const KNOWN_CODES = new Set<ApiErrorCode>([
   "invalid_input",
@@ -40,6 +48,7 @@ const KNOWN_CODES = new Set<ApiErrorCode>([
   "open_flags",
   "network_error",
   "server_error",
+  "internal_error",
 ]);
 
 export class ApiError extends Error {
@@ -94,6 +103,10 @@ export async function apiErrorFromResponse(res: Response): Promise<ApiError> {
         status,
       );
     }
+    // Any other no-envelope response, including bare HTTP 500 from
+    // an upstream proxy, maps to `server_error`. (Well-formed 5xx
+    // envelopes from the app go through the known-code path below
+    // and surface as `internal_error` when the server names it.)
     return new ApiError("server_error", "Unexpected server response.", status);
   }
   if (

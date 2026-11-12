@@ -236,7 +236,7 @@ function computeOpenFlags(extractedItems: Iterable<ItemView>): number {
 
 // ─── Extracted items (28 lines in rfp_messy — 26 items + 2 skipped nulls) ─
 
-const EXTRACTED_PAYLOADS: ItemView[] = [
+export const EXTRACTED_PAYLOADS: ItemView[] = [
   { id: "item_1", kind: "material", description: "2x4 x 8' SPF #2",
     quantity_text: "100", unit_raw: "pcs",
     source: src(2, "1. (100) 2x4 x 8' SPF #2"), notes: [] },

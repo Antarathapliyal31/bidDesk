@@ -334,9 +334,6 @@ with generator, four PDFs/text, four expected JSONs.
   errors. Amber if `will_retry`, red if the retry didn't recover.
 - `trace-details/InjectedBadge.tsx` — violet "Demo fault" pill
   for spans whose error_kind was `injected` (SPEC §10.6).
-- `BidWorkspacePlaceholder.tsx` — Task #19's workspace lands
-  here; today renders the "Bid ready" summary when `bid.ready`
-  has fired.
 - `source/SourcePanelContext.tsx` — one-panel-per-page React
   context + provider + `useSourcePanel()` hook. `openSource`
   replaces the current `(source, pdfUrl)` pair (no stacking);
@@ -363,6 +360,46 @@ with generator, four PDFs/text, four expected JSONs.
   (same prefix fallback as the SSE registry). The Phase-5 merge
   replaces this with `/api/runs/:id/source.pdf`.
 
+## frontend/src/features/bid/
+- `BidWorkspace.tsx` — editable bid workspace (SPEC §9 / §11.2).
+  Mounted on the Bid tab via `useBidDraft(runId)`. Owns focus
+  state (one row + optional editing field), reprice dialog
+  state, and the finalize call. Pure dispatcher — every mutation
+  is routed through the reducer via `queueOp`.
+- `BidHeader.tsx` — project title + branch + revision + partial
+  banner (lists `partial_reasons` when the orchestrator reached
+  a budget/time limit and the fallback assembler stepped in).
+- `ReviewQueue.tsx` — list of lines with `review.state === "open"`.
+  Click to jump; keyboard `]` / `[` cycle next / previous.
+- `LinesTable.tsx` + `BidLineRow.tsx` — the editable line grid.
+  Each row has inline `EditableCell` affordances for quantity,
+  unit price, SKU, description, plus action buttons (accept /
+  re-price / delete) and an `OriginMarker` per field (agent /
+  user_filled / user_overridden).
+- `cells/EditableCell.tsx` — small inline-edit primitive.
+  Display mode shows the current value; clicking (or Enter)
+  flips to an `<input>` seeded with it. Enter commits, Esc
+  cancels, blur commits.
+- `Sections.tsx` — read-only sub-sections rendered below the
+  grid: Exclusions · Labor · Unreadable · Conflicts (with
+  side-by-side citation cards) · Assumptions · Contractor
+  Questions.
+- `TotalsBar.tsx` — subtotal · tax (half-up SPEC §9.3) · total
+  block. Tabular numerals, right-aligned, server-confirmed —
+  the client never recomputes.
+- `FinalizeBar.tsx` — sticky bottom bar. Save state chip
+  (Saved · Saving… · Unsaved changes · Couldn't save — Retry).
+  Finalize button disabled while reviews are open; the
+  disabled reason links to the first open row.
+- `RepriceDialog.tsx` — Radix Dialog showing a `before → after`
+  pricing proposal with an Apply / Discard pair. Nothing is
+  applied until the user clicks Apply; applying queues an
+  `apply_reprice` op.
+- `useBidKeyboard.ts` — hook registering the Bid-tab shortcuts
+  (`j`/`k`/`Enter`/`Esc`/`a`/`]`/`[`/`r`/`⌘↵`). Suppressed
+  while a cell has an editable input focused or while a modal
+  is open.
+
 ## frontend/src/components/
 - `CitationLink.tsx` — "p. N" chip button. Opens the SourcePanel
   via `useSourcePanel()`; renders "—" when the source has no
@@ -386,6 +423,13 @@ with generator, four PDFs/text, four expected JSONs.
   ancestor. `run.finished` with `partial`/`failed`/`interrupted`
   marks still-open spans/lanes as `interrupted` rather than
   pretending they finished.
+- `bidDraftReducer.ts` — pure, idempotent reducer for the Bid
+  tab (SPEC §11.3). Three slots: `serverDraft` (last
+  authoritative), `localDraft` (optimistic), `pendingOps[]`.
+  Handles `fetchSucceeded`, `opQueued`, `saveStarted`,
+  `saveSucceeded` (reapplies late ops on the server's new
+  draft), `saveStale` / `saveInvalid` / `saveTransportError`,
+  `errorDismissed`. Helpers `isDirty` and `saveState`.
 - `trace.ts` — pure `buildSpanTree(spans, rootSpanIds)` indexer.
   Children are sorted by `startedAtTs` ascending with id as a
   stable tiebreaker; dangling `parentId` references are dropped

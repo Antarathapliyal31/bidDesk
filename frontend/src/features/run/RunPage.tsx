@@ -7,7 +7,8 @@ import { useDocumentTitle } from "@/app/useDocumentTitle";
 import { EmptyState } from "@/components/EmptyState";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 
-import { BidWorkspacePlaceholder } from "./BidWorkspacePlaceholder";
+import { BidWorkspace } from "@/features/bid/BidWorkspace";
+
 import { LiveView } from "./LiveView";
 import { RunHeader } from "./RunHeader";
 import { TraceView } from "./TraceView";
@@ -101,7 +102,14 @@ export function RunPage() {
           <LiveView state={state} pdfUrl={pdfUrl} />
         </TabsContent>
         <TabsContent value="bid" className="flex-1">
-          <BidWorkspacePlaceholder state={state} />
+          <BidWorkspace
+            runId={runId}
+            state={state}
+            projectName={projectName}
+            branchName={summary?.branch_name ?? null}
+            pdfUrl={pdfUrl}
+            active={tab === "bid"}
+          />
         </TabsContent>
         <TabsContent value="trace" className="flex-1">
           <TraceView state={state} />

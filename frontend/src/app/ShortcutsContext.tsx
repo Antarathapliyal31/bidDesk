@@ -41,6 +41,14 @@ type ShortcutsCtx = {
 
 const Ctx = createContext<ShortcutsCtx | null>(null);
 
+/**
+ * Raw context handle for consumers that need to read the value
+ * optionally. `useBidKeyboard` uses this so tests don't need to
+ * wrap in the full provider tree — missing provider → single-key
+ * shortcuts default to enabled.
+ */
+export const ShortcutsSheetCtx = Ctx;
+
 export function ShortcutsProvider({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [singleKeyEnabled, setSingleKeyEnabledRaw] = useState<boolean>(() =>
