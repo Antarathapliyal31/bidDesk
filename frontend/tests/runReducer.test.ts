@@ -637,6 +637,40 @@ describe("runReducer — run.finished", () => {
     expect(state.status).toBe("partial");
   });
 
+  it("interrupted (server restart): still-running spans → 'interrupted', working lanes → 'interrupted', failed lanes keep failed + errorKind", () => {
+    const state = reduceAll([
+      runStarted(1),
+      spanStarted(2, "s1", null, "orchestrator", "triage", "2026-11-11T00:00:00Z"),
+      spanStarted(3, "s2", null, "document_analyst", "extract", "2026-11-11T00:00:02Z"),
+      // pricing_agent fails terminally before the restart.
+      spanStarted(4, "s3", null, "pricing_agent", "batch", "2026-11-11T00:00:04Z"),
+      spanFailed(5, "s3", "pricing_agent", /*will_retry*/ false, "timeout"),
+      // Server restart emits run.finished(status=interrupted).
+      {
+        ...EB,
+        id: 6,
+        ts: "2026-11-11T00:00:10Z",
+        type: "run.finished",
+        payload: { status: "interrupted", outcome: null, outcome_detail: null },
+      },
+    ]);
+    // Running spans → interrupted (not finished, not failed).
+    expect(state.spans["s1"]?.state).toBe("interrupted");
+    expect(state.spans["s2"]?.state).toBe("interrupted");
+    expect(state.spans["s1"]?.durationMs).toBe(10_000);
+    expect(state.spans["s2"]?.durationMs).toBe(8_000);
+    // Previously-failed span keeps its failed state + errorKind.
+    expect(state.spans["s3"]?.state).toBe("failed");
+    expect(state.spans["s3"]?.errorKind).toBe("timeout");
+    // Working lanes → interrupted.
+    expect(state.agents.orchestrator.state).toBe("interrupted");
+    expect(state.agents.document_analyst.state).toBe("interrupted");
+    // Failed lane stays failed with errorKind preserved.
+    expect(state.agents.pricing_agent.state).toBe("failed");
+    expect(state.agents.pricing_agent.errorKind).toBe("timeout");
+    expect(state.status).toBe("interrupted");
+  });
+
   it("failed: terminal span + lane states are 'interrupted' (matches partial path)", () => {
     const state = reduceAll([
       runStarted(1),

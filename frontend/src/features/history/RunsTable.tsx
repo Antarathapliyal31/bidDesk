@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type RunSummary } from "@/api";
+import { cn } from "@/lib/utils";
 
-import { RunRow } from "./RunRow";
+import { ROW_GRID, RunRow } from "./RunRow";
 
 /**
  * Table of runs (SPEC §11.1 History). Keyboard-first:
@@ -63,14 +64,20 @@ export function RunsTable({ runs }: Props) {
 
   return (
     <div className="overflow-hidden rounded-md border border-border bg-card">
-      <div className="grid grid-cols-[140px_1fr_160px_70px_70px_120px_110px] gap-4 border-b border-border bg-muted/50 px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+      <div
+        className={cn(
+          "grid items-center gap-4 border-b border-border bg-muted/50 px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground",
+          "whitespace-nowrap",
+          ROW_GRID,
+        )}
+      >
         <span>Status</span>
         <span>Project · Input</span>
         <span>Branch</span>
         <span className="text-right">Lines</span>
         <span className="text-right">Flags</span>
-        <span className="justify-self-end">Total</span>
-        <span>Created</span>
+        <span className="text-right">Total</span>
+        <span className="pl-3">Created</span>
       </div>
       <div role="list" aria-label="Runs">
         {runs.map((r, i) => (

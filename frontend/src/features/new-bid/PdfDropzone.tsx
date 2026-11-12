@@ -2,6 +2,7 @@ import { FileTextIcon, UploadCloudIcon, XIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { InlineError } from "@/components/InlineError";
+import { formatFileSize } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 import { MAX_PAGES, MAX_UPLOAD_MB } from "./limits";
@@ -110,7 +111,7 @@ export function PdfDropzone({ file, onChange, errorId }: Props) {
               {file.name}
             </p>
             <p className="tabular text-xs text-muted-foreground">
-              {(file.size / (1024 * 1024)).toFixed(1)} MB
+              {formatFileSize(file.size)}
             </p>
           </div>
           <button

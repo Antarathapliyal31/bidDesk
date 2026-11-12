@@ -474,6 +474,124 @@ it, open/close transitions snap instead of easing.
 Trade-off: This is the single acceptable addition to tokens.css
 mentioned in F3. Documented in that entry's overwrite guard.
 
+## F6. Best-effort quote highlight in the SourcePanel (no findController) — 2026-11-11
+Decision: In the SourcePanel's PDF viewer, highlight the cited
+quote using react-pdf's `customTextRenderer` prop only. On the
+cited page, each text item passes through the renderer; if the
+item's normalized form (whitespace-collapsed + lowercased) is a
+substring of the normalized quote and its length is ≥ 3, wrap it
+in `<mark>`. No `findController`, no cross-item spans, no fuzzy
+match. Vision sources (`read_via = "vision"`) skip highlighting
+entirely — the text layer still renders so selection works, but
+nothing is marked and an amber "Read from image — check this
+page" callout sits above the viewer.
+Because: SPEC §11.2 says "page jump + text-layer highlight". The
+pdfjs findController is doable but non-trivial — it takes two
+async passes to produce text-layer offsets and needs its own
+test harness. `customTextRenderer` is a one-line hook into the
+same text layer that already renders; the quote callout above
+the viewer carries the verbatim string, so a miss falls back
+gracefully rather than hiding the quote. The 3-character minimum
+filters single-character items (punctuation, "x", "'") that
+false-match almost any quote.
+Alternatives considered: (a) full findController with cross-item
+offsets — rejected for Phase 7 scope; (b) no highlight at all,
+callout only — rejected because the estimator wants their eye
+pulled to the right line; (c) custom text-splitting + regex over
+the concatenated page text — reintroduces every edge case
+findController already handles.
+Trade-off: Quotes that span two text items (e.g. "SPF" and "#2"
+split across spans) won't fully highlight; one or the other may
+light up alone. The callout still shows the full quote, so the
+ground truth is always visible. Phase 8+ can swap in the real
+findController behind the same `<PdfViewer source={…} />` API
+without touching the SourcePanel or CitationLink call sites.
+How to extend: `src/lib/quote.ts` holds `normalizeQuote`,
+`matchesQuote(item, normalized, minLen=3)`, and `escapeHtml`
+(safe output for `customTextRenderer`'s `dangerouslySetInnerHTML`
+sink). Unit-tested in `tests/quote.test.ts`.
+
+## F7. react-pdf lazy-loaded via `React.lazy` — 2026-11-11
+Decision: Import `react-pdf` only from
+`src/features/run/source/PdfViewerImpl.tsx`, which is pulled in
+via `React.lazy(() => import("./PdfViewerImpl"))` inside the
+wrapper `PdfViewer.tsx`. The pdfjs worker is wired via Vite's
+`?url` import on `pdfjs-dist/build/pdf.worker.mjs`.
+Because: pdfjs + react-pdf is ~190 KB gzipped on top of a ~190 KB
+gzipped main bundle; the viewer runs only when the user clicks
+their first citation. Shipping it in the main chunk would double
+the TTI payload for every History / New-bid visit that never
+opens a source.
+Verified: `npm run build` emits
+`dist/assets/index-*.js` (191 KB gz) and
+`dist/assets/PdfViewerImpl-*.js` (190 KB gz) as separate chunks;
+the pdfjs worker is a third chunk (2.2 MB raw, loaded on first
+open only).
+Trade-off: First citation click pays a chunk-load latency. A
+page-shaped `Skeleton` inside `<Suspense fallback>` keeps the
+panel non-blank while the chunk resolves (SPEC §11.4: never a
+spinner alone, skeletons shaped like the content).
+
+## F9. `project_name` sourced from the run row, not from events — 2026-11-11
+Decision: The RunPage title ("Northside Remodel" + "rfp_messy.pdf"
+subtitle) sources `project_name` from `useRunSummary(runId)` —
+backed by `GET /api/runs/:id` in prod and `FIXTURE_RUNS` lookup in
+fixture mode — NOT from a field on the `run.started` event.
+Because: `run.started` fires at ingest. The document analyst
+hasn't opened the PDF yet, so the server legitimately doesn't
+know `project_name` at that point. Carrying it on the event was a
+convenience that quietly changed the contract — the backend
+would have to know it at ingest or leave it `null` until a
+later `document.facts` event. Keeping `project_name` on the
+`runs` row (SPEC §5.1) and fetching it alongside the event
+stream matches what the real backend can produce AND what
+History already queries for the run list.
+Alternatives considered: (a) carry on `run.started` as-is —
+rejected per above; (b) emit a later `document.facts` event
+when the analyst infers a project name — reasonable for Phase 8+
+but orthogonal to the title concern; (c) hard-code UI to show
+`input_name` only — loses the readability win on history rows.
+Trade-off / backend contract impact: `GET /api/runs/:id` (SPEC
+§13) must include `project_name` in its response (it already
+does per SPEC §5.1). The RunPage now makes two requests per
+view — one for events, one for the summary — but TanStack Query
+dedupes both across tab navigations, and `summary` has
+`staleTime: Infinity` so finalized runs never refetch. Call
+sites don't move: `useRunSummary(runId)` lives in `@/api` next
+to `useRunStream`.
+
+## F8. `run_demo_*` prefix fallback for fixture streams + PDFs — 2026-11-11
+Decision: Both the SSE registry (`src/dev-fixtures/sse/index.ts`)
+and the PDF-URL helper (`src/features/run/source/pdfRunUrl.ts`)
+accept any id starting with `run_demo_` and fall back to the
+messy fixture: the SSE registry serves `RFP_MESSY_EVENTS`,
+`pdfUrlForRun` serves `/samples/rfp_messy.pdf`. `isReusedStream`
+is `true` whenever the fallback kicks in; the RunHeader surfaces
+a violet "Demo data" chip so the demo trail is visible.
+`useCreateRun` returns `run_demo_messy` directly for every
+fixture-mode submit, so the happy path (clicking the rfp_messy
+sample) hits the exact-match stream.
+Because: without the fallback, clicking any other sample card
+(`rfp_clean`, `rfp_scanned`, paste) or submitting a run from the
+History fixture rows landed on "We couldn't find that run"
+because no scripted stream matched. The fallback keeps the demo
+end-to-end while still naming its artifice ("Demo data" chip,
+amber-neutral — not green). The "Demo data" chip is intentionally
+NOT shown for the exact-match `run_demo_messy` run because that
+one is the canonical scripted demo.
+Alternatives considered: (a) hard-404 for unmapped runs — honest
+but makes the fixture New-bid feel broken; (b) generate a bespoke
+stream per sample — multiplies the fixture surface area for
+Phase 7, when all four sample streams converge to the same shape
+in Phase 5 anyway; (c) silently redirect to `/runs/run_demo_messy`
+— trumps the user's intent, loses the navigation they just made.
+Trade-off: Two distinct demo runs will show identical events +
+PDFs. The chip makes this explicit; the test
+`tests/NewBidToRun.test.tsx` locks the invariant
+("creating a run from rfp_messy navigates to run_demo_messy and
+renders the Live view"). Phase 5 merge deletes the fallback
+along with the SSE registry and `pdfRunUrl.ts`.
+
 ---
 
 ## Superseded notes
