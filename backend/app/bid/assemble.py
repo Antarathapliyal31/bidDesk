@@ -202,6 +202,7 @@ def _review_reasons_for(
     item: dict[str, Any],
     price: dict[str, Any] | None,
     in_conflict: bool,
+    triage: dict[str, Any] | None = None,
 ) -> list[ReviewReason]:
     """Compute review reasons for one line per SPEC §9.3 step 3.
     Returns [] when the line is clean."""
@@ -240,6 +241,12 @@ def _review_reasons_for(
     verify_notes = price.get("verify_notes") or []
     if any(n.startswith("sanity_range") for n in verify_notes):
         reasons.append("sanity_range")
+    # DECISIONS F19: `classify_items` flagged this line as
+    # ambiguous but the pricing retry later placed a match. Keep
+    # the open-review flag so the estimator confirms — code must
+    # not silently clear the model's doubt.
+    if triage is not None and triage.get("category") == "ambiguous":
+        reasons.append("ambiguous")
     return reasons
 
 
@@ -355,13 +362,14 @@ def _line_from(
     requirements: list[dict[str, Any]],
     price: dict[str, Any] | None,
     in_conflict: bool,
+    triage: dict[str, Any] | None = None,
 ) -> BidLine:
     """Build a BidLine. Pricing-side fields come straight from
     the price_results row (which was authored by code, not the
     model). The BidLine validator re-asserts the identities."""
 
     line_id = f"line_{item['id']}"
-    reasons = _review_reasons_for(item, price, in_conflict)
+    reasons = _review_reasons_for(item, price, in_conflict, triage)
     review = ReviewState(
         state=ReviewStateT.open if reasons else ReviewStateT.none,
         reasons=reasons,
@@ -619,6 +627,7 @@ def build_bid(input_: AssemblyInput) -> AssemblyResult:
                 requirements,
                 price,
                 in_conflict=iid in conflicted_item_ids,
+                triage=input_.triage_by_item.get(iid),
             )
         )
 

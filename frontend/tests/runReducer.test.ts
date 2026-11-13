@@ -108,6 +108,20 @@ describe("runReducer — idempotency", () => {
     const state = reduceAll([runStarted(1), runStarted(2), runStarted(3)]);
     expect(state.lastEventId).toBe(3);
   });
+
+  it("replay-then-live delivery with overlapping ids yields no duplicate state", () => {
+    // Simulates the worst case we'd see if `/events` and `/stream`
+    // were both consumed: the browser hands the reducer a replay
+    // block (ids 1..3) followed by a live tail (ids 2..4). The
+    // reducer's `id <= lastEventId` guard must drop the overlap
+    // and not advance any derived counts twice.
+    const replay = [runStarted(1), runStarted(2), runStarted(3)];
+    const live = [runStarted(2), runStarted(3), runStarted(4)];
+    const naive = reduceAll([...replay, ...live]);
+    const canonical = reduceAll([runStarted(1), runStarted(2), runStarted(3), runStarted(4)]);
+    expect(naive).toEqual(canonical);
+    expect(naive.lastEventId).toBe(4);
+  });
 });
 
 // ─── Unknown event (point 1) ───────────────────────────────────────

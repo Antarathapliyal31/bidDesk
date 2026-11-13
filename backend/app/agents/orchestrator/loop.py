@@ -88,7 +88,7 @@ from app.runtime.trace import trace_span
 
 MAX_ORCHESTRATOR_TURNS = 16  # Antara: sized for rfp_messy comfort
 COMPLETION_PASS_DEADLINE_FLOOR_S = 30.0
-PRICING_BATCH_SIZE = 8
+PRICING_BATCH_SIZE = 4  # see tools.py _PRICING_BATCH_SIZE (DECISIONS F15)
 SHAPE_ERROR_RETRIES = 1
 
 
@@ -250,14 +250,21 @@ async def _emit_agent_activity(bus: EventBus, run_id: str, text: str) -> None:
 async def _run_completion_pass(
     ctx: OrchestratorContext,
 ) -> tuple[int, list[str]]:
-    """Any `price`-triaged or untriaged material item without a
-    price_results row gets priced via delegate (same pricing
-    agent). Returns `(priced_count, partial_reasons)` — on budget
-    exhaustion, remaining items are left unpriced and their ids
-    are added to partial_reasons via a single bullet."""
+    """Any `price`-triaged or untriaged material item that isn't
+    priced yet — OR was priced but hit `max_steps_exceeded` /
+    agent_error in its first pass — gets re-priced one item per
+    batch. One-per-batch gives each item the full `max_steps`
+    cap to itself, which is the difference between a flaky batch
+    and a missed line (DECISIONS F15).
+
+    Returns `(priced_count, partial_reasons)`. On budget exhaustion
+    the remaining items are left and their count is recorded in
+    `partial_reasons`.
+    """
 
     triage_rows = await repo.list_item_triage(ctx.db, run_id=ctx.run_id)
     triage_by_item = {t["item_id"]: t for t in triage_rows}
+    prior_results = await repo.latest_price_result_per_item(ctx.db, run_id=ctx.run_id)
 
     outstanding: list[str] = []
     for iid, item in ctx.items_by_id.items():
@@ -265,11 +272,35 @@ async def _run_completion_pass(
             continue
         tri = triage_by_item.get(iid)
         cat = (tri or {}).get("category")
-        if cat not in (None, "price"):
+        # Retry eligible triage categories:
+        #   - None / "price": never priced or priced but fallible.
+        #   - "ambiguous" (DECISIONS F20): classify_items couldn't
+        #     decide; pint-convertible units like `yards` on trim
+        #     ARE priceable. Assembly keeps the open-review flag.
+        if cat not in (None, "price", "ambiguous"):
             continue
-        if iid in ctx.priced_item_ids:
+        if iid not in ctx.priced_item_ids:
+            # Never priced — classic completion case.
+            outstanding.append(iid)
             continue
-        outstanding.append(iid)
+        # Priced previously; was it a transient failure the batch
+        # couldn't recover from? Only retry a narrow set so we
+        # don't chew budget re-trying genuine no_match / skipped.
+        row = prior_results.get(iid)
+        if row is None:
+            continue
+        if row.get("status") != "failed":
+            continue
+        notes = row.get("verify_notes") or []
+        if any(
+            n == "max_steps_exceeded" or n == "agent_error" or n.startswith("not_priced:")
+            for n in notes
+            if isinstance(n, str)
+        ):
+            # Pop from priced_item_ids so handle_price_items
+            # doesn't short-circuit on it.
+            ctx.priced_item_ids.discard(iid)
+            outstanding.append(iid)
 
     if not outstanding:
         return 0, []
@@ -282,14 +313,41 @@ async def _run_completion_pass(
             f"only {remaining_s:.0f}s left on run deadline"
         ]
 
-    try:
-        res = await handle_price_items(
-            PriceItemsInput(item_ids=outstanding),
-            ctx=ctx,
-        )
-    except BudgetExhausted as exc:
-        return 0, [f"pricing completion pass: budget_exhausted({exc.which})"]
-    return int(res.get("ok", 0)), []
+    # One item per batch — each gets the full step cap and can't
+    # be dragged down by a noisy sibling.
+    priced = 0
+    failed_ids: list[str] = []
+    for iid in outstanding:
+        try:
+            res = await handle_price_items(
+                PriceItemsInput(item_ids=[iid]),
+                ctx=ctx,
+            )
+        except BudgetExhausted as exc:
+            remaining = [x for x in outstanding if x not in ctx.priced_item_ids]
+            return priced, [
+                f"pricing completion pass: budget_exhausted({exc.which}) "
+                f"after {priced}/{len(outstanding)}; unpriced={remaining}"
+            ]
+        priced += int(res.get("ok", 0))
+        row = (await repo.latest_price_result_per_item(ctx.db, run_id=ctx.run_id)).get(iid)
+        if row is None or row.get("status") == "failed":
+            failed_ids.append(iid)
+        # Second budget check between items so one slow retry
+        # doesn't stall all of them.
+        remaining_s = float(ctx.budget.remaining()["deadline_s"])
+        if remaining_s < COMPLETION_PASS_DEADLINE_FLOOR_S:
+            unpriced = [x for x in outstanding if x not in ctx.priced_item_ids]
+            if unpriced:
+                return priced, [
+                    f"pricing completion pass: stopped after {priced}/{len(outstanding)}; "
+                    f"only {remaining_s:.0f}s left; unpriced={unpriced}"
+                ]
+            break
+    reasons: list[str] = []
+    if failed_ids:
+        reasons.append(f"pricing completion pass: {len(failed_ids)} still failed ({failed_ids})")
+    return priced, reasons
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +387,31 @@ async def run_orchestrator(
         name=analyst_result.get("project_name"),
         due_date_text=analyst_result.get("due_date_text"),
     )
+
+    # Fan out per-page + per-item events the Live view listens for
+    # (SPEC §10.3). Done HERE in the orchestrator — not in the
+    # analyst — so the analyst stays a pure extractor and this
+    # branch doesn't touch `agents/analyst/*` (another session is
+    # editing that module). Persist-then-publish is handled inside
+    # `EventBus.emit`.
+    for pr in analyst_result.get("page_routes") or []:
+        page_no = pr.get("page_no")
+        route = pr.get("route")
+        if not isinstance(page_no, int) or not isinstance(route, str):
+            continue
+        await bus.emit(
+            type="page.routed",
+            run_id=run_id,
+            agent=AgentName.orchestrator,
+            payload={"page_no": page_no, "route": route},
+        )
+    for iv in items_views:
+        await bus.emit(
+            type="item.extracted",
+            run_id=run_id,
+            agent=AgentName.orchestrator,
+            payload={"item": iv.model_dump(mode="json")},
+        )
 
     # Persist items. They come in verified by the analyst; here
     # we just store them so the loop + assembly can read them back.

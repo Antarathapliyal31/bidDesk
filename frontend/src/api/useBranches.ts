@@ -2,25 +2,24 @@ import { useQuery } from "@tanstack/react-query";
 
 import { FIXTURE_BRANCHES, type FxBranch, withDelay } from "@/dev-fixtures";
 
+import type { ApiError } from "./ApiError";
+import { apiFetch, isFixtureMode } from "./client";
+
 /**
- * Branches data access. Already a real `useQuery` so the New-bid
- * form's loading / error / data branches exist today — in Phase 7
- * only the `queryFn` changes (fetch `GET /api/branches` instead of
- * resolving a fixture).
- *
- * TEMPORARY: this is one of the few files allowed to import
- * `@/dev-fixtures/*`. ESLint `no-restricted-imports` scopes those
- * imports to `src/api/**` + `tests/**` (see eslint.config.js);
- * Phase 7 removes the fixture import here entirely.
+ * Branches data access. Real `useQuery` — fixture mode swaps the
+ * resolver only. Shape is pinned by `GET /api/branches` in the
+ * backend (`app/api/branches.py`); `tax_rate_ppm` is display-only.
  */
 export type Branch = FxBranch;
 
 export function useBranches() {
-  return useQuery<Branch[]>({
+  return useQuery<Branch[], ApiError>({
     queryKey: ["branches"],
-    queryFn: () => withDelay(FIXTURE_BRANCHES),
-    // Branches are a stable catalog resource — refetch only when the
-    // query is explicitly invalidated, not on every mount / focus.
+    queryFn: async () => {
+      if (isFixtureMode()) return withDelay(FIXTURE_BRANCHES);
+      const res = await apiFetch("/api/branches");
+      return (await res.json()) as Branch[];
+    },
     staleTime: Infinity,
   });
 }

@@ -20,6 +20,9 @@ export type {
   PricedLineView,
   RunEvent,
   RunEventType,
+} from "./events";
+export { RUN_EVENT_TYPES } from "./events";
+export type {
   SourceRef,
   TransferOption,
 } from "./events";
@@ -36,14 +39,15 @@ export type {
   LaborLine,
   UnreadableLine,
   EditOp,
-  SetQuantityOp,
+  SetQtyOp,
   SetUnitPriceOp,
   SetSkuOp,
   SetDescriptionOp,
   AcceptLineOp,
   DeleteLineOp,
   AddLineOp,
-  ApplyRepriceOp,
+  ApplyProposalOp,
+  DismissProposalOp,
   MatchInfo,
   MatchStatus,
   MatchAssumption,

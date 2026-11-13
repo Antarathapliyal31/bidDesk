@@ -1,40 +1,23 @@
 /**
- * Live-run stream hook (SPEC §11.3). Fixture-aware on this branch;
- * three fixture paths (see `getFixtureStream`):
+ * Live-run stream hook (SPEC §11.3).
  *
- *   - "live"    — scripted stream played event-by-event via
- *                 `playStream`. The user watches the stream evolve
- *                 (rfp_messy canonical + New-bid fallback).
- *   - "instant" — scripted stream drained synchronously via
- *                 `useReducer`'s initializer so the page shows the
- *                 run's terminal state on first paint. Used for
- *                 History-row clicks (SPEC §11.3 "replay from DB"
- *                 for finished runs).
- *   - null      — unknown runId; connection: "closed", startedAt
- *                 stays null, RunPage shows the empty state.
+ * Real path: open `EventSource('/api/runs/{id}/stream')` and
+ * subscribe one shared handler per event-type name. The backend
+ * emits NAMED SSE frames (`event: run.started`, `event: item.priced`,
+ * etc.); `EventSource.onmessage` only fires for the unnamed default
+ * event, so without `addEventListener(type, …)` the UI goes "Live"
+ * but receives nothing. The backend's `/stream` route first replays
+ * every persisted event (respecting `Last-Event-ID` / `?after_id=`),
+ * then flips to live without a gap. The reducer's
+ * `event.id <= state.lastEventId` guard (`runReducer.ts`) is the
+ * belt on top of the single-connection design.
  *
- * Phase 5 merge replaces all three with:
- *   1. `GET /api/runs/{id}/events?after_id=0` — replay persisted
- *      events into the reducer (initializer still drains; same
- *      invariant — reducer is the only way state is built).
- *   2. Open `EventSource('/api/runs/{id}/stream?after_id=<last>')`;
- *      every incoming message is JSON.parse'd and dispatched.
- *   3. On error, mark `reconnecting`; the browser retries SSE with
- *      `Last-Event-ID` set to our most-recent `id`.
- *
- * RunId-change handling: RunPage is keyed by `runId` (router.tsx)
- * so a new runId remounts this hook and re-runs the initializer.
- * Without that, the reducer's id-guard would silently drop the new
- * stream's events (they all have ids ≤ the previous run's).
- *
- * StrictMode note: on dev-mode double-invocation, the first effect
- * run's cleanup cancels pending `setTimeout`s but any already-
- * dispatched events have advanced `state.lastEventId`. The second
- * effect run calls `playStream` again starting from id 1; the
- * reducer's `id <= lastEventId` guard makes those replays
- * harmless.
+ * Fixture path (`VITE_FIXTURES=1`):
+ *   - "live"    → scripted stream played event-by-event.
+ *   - "instant" → scripted stream drained in the initializer.
+ *   - null      → unknown runId; connection: "closed".
  */
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 
 import {
   getFixtureStream,
@@ -48,12 +31,9 @@ import {
   type RunViewState,
 } from "@/lib/runReducer";
 
-/**
- * Re-exported here so features (`RunHeader`) can read the
- * "is this a reused fixture stream?" flag without reaching into
- * `@/dev-fixtures` directly — the ESLint no-restricted-imports
- * rule scopes dev-fixtures to `src/api/**` + `tests/**`.
- */
+import { isFixtureMode } from "./client";
+import { RUN_EVENT_TYPES, type RunEvent } from "./events";
+
 export const isReusedStream = _isReusedStream;
 
 export type UseRunStreamResult = {
@@ -62,48 +42,87 @@ export type UseRunStreamResult = {
 };
 
 export type UseRunStreamOptions = {
-  /**
-   * Delay between consecutive fixture events (ms). Default 150 in
-   * dev so the RunPage demo has a visible rhythm; tests pass 0 to
-   * drain the stream as fast as setTimeout allows.
-   */
+  /** Delay between fixture events (ms). Tests pass 0. */
   intervalMs?: number;
+  /**
+   * Inject a custom EventSource factory. Lets tests mock a
+   * NAMED-event stream without relying on jsdom's EventSource.
+   */
+  eventSourceFactory?: (url: string) => EventSource;
 };
 
 export function useRunStream(
   runId: string,
   options: UseRunStreamOptions = {},
 ): UseRunStreamResult {
-  // The initializer runs ONCE per mount. For "instant" fixture
-  // streams (History-row clicks) we drain the whole event list
-  // through the reducer here so the terminal state is on screen
-  // before the first paint — no spinner, no empty state, no
-  // mid-render event tick. For "live" and unknown runs it returns
-  // the empty initial state; the useEffect below starts playStream
-  // for "live".
   const [state, dispatch] = useReducer(runReducer, runId, (rid) => {
+    if (!isFixtureMode()) return initialRunViewState;
     const fx = getFixtureStream(rid);
     if (fx === null || fx.mode !== "instant") return initialRunViewState;
     return fx.events.reduce((s, e) => runReducer(s, e), initialRunViewState);
   });
 
-  // `connection` is deterministic from the fixture result. Live
-  // streams render as "live" while events are still arriving;
-  // instant streams and unknown runs render as "closed" (there's
-  // nothing more coming). Phase-5 merge reintroduces a useState
-  // here for real EventSource transitions.
-  const fixture = getFixtureStream(runId);
-  const connection: ConnectionState =
-    fixture === null ? "closed" : fixture.mode === "live" ? "live" : "closed";
+  const [connection, setConnection] = useState<ConnectionState>(() => {
+    if (!isFixtureMode()) return "connecting";
+    const fx = getFixtureStream(runId);
+    return fx === null ? "closed" : fx.mode === "live" ? "live" : "closed";
+  });
 
   const intervalMs = options.intervalMs;
+  const eventSourceFactory = options.eventSourceFactory;
 
+  // Fixture branch.
   useEffect(() => {
+    if (!isFixtureMode()) return undefined;
     const fx = getFixtureStream(runId);
     if (fx === null || fx.mode !== "live") return undefined;
     const stop = playStream(fx.events, dispatch, { intervalMs: intervalMs ?? 150 });
     return () => stop();
   }, [runId, intervalMs]);
+
+  // Real branch: one SSE connection carries replay + live. Named
+  // listeners (one per event type in the union) parse each frame
+  // and dispatch into the reducer.
+  useEffect(() => {
+    if (isFixtureMode()) return undefined;
+    const url = `/api/runs/${runId}/stream`;
+    const es = eventSourceFactory ? eventSourceFactory(url) : new EventSource(url);
+    setConnection("connecting");
+
+    const onOpen = () => setConnection("live");
+    const onError = () => {
+      // Browser auto-retries with Last-Event-ID; flag it so the UI
+      // can surface a reconnect indicator.
+      setConnection("reconnecting");
+    };
+    const onFrame = (ev: MessageEvent<string>) => {
+      try {
+        const parsed = JSON.parse(ev.data) as RunEvent;
+        dispatch(parsed);
+        if (parsed.type === "run.finished") {
+          es.close();
+          setConnection("closed");
+        }
+      } catch {
+        setConnection("reconnecting");
+      }
+    };
+
+    es.addEventListener("open", onOpen);
+    es.addEventListener("error", onError);
+    for (const type of RUN_EVENT_TYPES) {
+      es.addEventListener(type, onFrame as EventListener);
+    }
+
+    return () => {
+      es.removeEventListener("open", onOpen);
+      es.removeEventListener("error", onError);
+      for (const type of RUN_EVENT_TYPES) {
+        es.removeEventListener(type, onFrame as EventListener);
+      }
+      es.close();
+    };
+  }, [runId, eventSourceFactory]);
 
   return { state, connection };
 }

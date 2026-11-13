@@ -369,7 +369,20 @@ class ConvertResult:
     sale_qty: int | None
     conversion_path: str | None
     confidence_cap: Literal["medium"] | None
-    note: Literal["unit_from_pint", "unit_conversion_unavailable"] | None
+    note: (
+        Literal[
+            "unit_from_pint",
+            "unit_conversion_unavailable",
+            # Analyst dropped the source unit (e.g. "(100) 2x4 x 8'
+            # SPF #2" parsed with unit_raw=None). When the target
+            # SKU is sold by the piece AND the extracted quantity
+            # is a positive whole number, the converter treats it
+            # as an EA count — code records a MatchAssumption and
+            # caps confidence at medium. See DECISIONS F14.
+            "assumed_ea_from_countless_qty",
+        ]
+        | None
+    )
 
 
 def convert_item_to_sale_qty(
@@ -462,6 +475,33 @@ def convert_item_to_sale_qty(
                     confidence_cap="medium",
                     note="unit_from_pint",
                 )
+
+    # Countless-quantity fallback (DECISIONS F14).
+    # Analyst sometimes drops `unit_raw` when the source quote
+    # writes the count as a parenthesised prefix ("(100) 2x4 x 8'
+    # SPF #2") — the number IS the piece count, the item has no
+    # linear or area unit to convert from. If the target SKU is
+    # sold by the piece AND the extracted qty is a positive whole
+    # number, treat it as identity-with-assumed-unit. `verify.py`
+    # records a MatchAssumption and caps confidence at medium so
+    # the estimator sees it's an inferred count, not a measured
+    # one. Non-EA sale units and non-integer qty still fail out
+    # to `unit_conversion_unavailable` — that path is correct for
+    # a sheet count without "SHT" or a drywall item without any
+    # unit.
+    if (
+        unit_raw is None
+        and item_unit is None
+        and sale_unit_str == "EA"
+        and item_qty == item_qty.to_integral_value()
+    ):
+        n = int(item_qty)
+        return ConvertResult(
+            sale_qty=n,
+            conversion_path=f"{n} → {n} EA (no unit; assumed pieces)",
+            confidence_cap="medium",
+            note="assumed_ea_from_countless_qty",
+        )
 
     return ConvertResult(None, None, None, "unit_conversion_unavailable")
 

@@ -1,0 +1,877 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "BidDesk",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Api Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/branches": {
+      "get": {
+        "summary": "List Branches",
+        "description": "Return every branch row. The frontend treats this as\n`staleTime: Infinity` (\u00a7F1) so a per-request sqlite connection\nis fine.",
+        "operationId": "list_branches_api_branches_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array",
+                  "title": "Response List Branches Api Branches Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/meta": {
+      "get": {
+        "summary": "Meta",
+        "description": "Config surface for the UI. Faults are hidden client-side when\n`demo_faults_enabled=false`; the server lists them anyway so the\nenum stays discoverable in the OpenAPI schema.",
+        "operationId": "meta_api_meta_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Meta Api Meta Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs": {
+      "post": {
+        "summary": "Create Run",
+        "description": "Start a run. Multipart body: file XOR text + branch_id +\noptional faults JSON. Returns 201 `{run_id}` and kicks the\npipeline off as a background task.",
+        "operationId": "create_run_api_runs_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_run_api_runs_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List Runs",
+        "operationId": "list_runs_api_runs_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Runs Api Runs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}": {
+      "get": {
+        "summary": "Get Run Detail",
+        "description": "Nested response per API_CONTRACT: `input`, `project`,\n`branch` are objects; the hook flattens at the boundary.",
+        "operationId": "get_run_detail_api_runs__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Run Detail Api Runs  Run Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/events": {
+      "get": {
+        "summary": "List Run Events",
+        "operationId": "list_run_events_api_runs__run_id__events_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          },
+          {
+            "name": "after_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "After Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response List Run Events Api Runs  Run Id  Events Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/stream": {
+      "get": {
+        "summary": "Stream Run Events",
+        "description": "SSE stream \u2014 replay DB events after `Last-Event-ID` then\nswitch to live. Uses `EventBus.stream_after` which subscribes\nFIRST (so no live event is dropped during the DB drain) and\ndedupes by id on the handoff. Heartbeat `:` comment every\n15 s; closes after `run.finished`.",
+        "operationId": "stream_run_events_api_runs__run_id__stream_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/source.pdf": {
+      "get": {
+        "summary": "Get Run Source Pdf",
+        "operationId": "get_run_source_pdf_api_runs__run_id__source_pdf_get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/bid": {
+      "patch": {
+        "summary": "Patch Run Bid",
+        "description": "Atomic edit: read + check + apply + replace + audit all\nland inside ONE `db.write()` transaction via\n`repo.apply_patch_atomically`. Two concurrent PATCHes on the\nsame revision are serialised by the write lock; exactly one\nbumps the revision, the other sees `StaleRevisionConflict` and\ngets 409.",
+        "operationId": "patch_run_bid_api_runs__run_id__bid_patch",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Patch Run Bid Api Runs  Run Id  Bid Patch"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/runs/{run_id}/bid/finalize": {
+      "post": {
+        "summary": "Finalize Run Bid",
+        "operationId": "finalize_run_bid_api_runs__run_id__bid_finalize_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Finalize Run Bid Api Runs  Run Id  Bid Finalize Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AcceptLine": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "accept_line",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id"
+        ],
+        "title": "AcceptLine"
+      },
+      "AddLine": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "add_line",
+            "title": "Op"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "sale_qty": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Sale Qty"
+          },
+          "sale_unit": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Sale Unit"
+          },
+          "unit_price_cents": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unit Price Cents"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "description",
+          "sale_qty",
+          "sale_unit",
+          "unit_price_cents"
+        ],
+        "title": "AddLine"
+      },
+      "ApplyProposal": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "apply_proposal",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          },
+          "proposal_id": {
+            "type": "string",
+            "title": "Proposal Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id",
+          "proposal_id"
+        ],
+        "title": "ApplyProposal"
+      },
+      "Body_create_run_api_runs_post": {
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "title": "Branch Id"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File"
+          },
+          "faults": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Faults"
+          }
+        },
+        "type": "object",
+        "required": [
+          "branch_id"
+        ],
+        "title": "Body_create_run_api_runs_post"
+      },
+      "DeleteLine": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "delete_line",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id"
+        ],
+        "title": "DeleteLine"
+      },
+      "DismissProposal": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "dismiss_proposal",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          },
+          "proposal_id": {
+            "type": "string",
+            "title": "Proposal Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id",
+          "proposal_id"
+        ],
+        "title": "DismissProposal"
+      },
+      "EditRequest": {
+        "properties": {
+          "draft_revision": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Draft Revision"
+          },
+          "ops": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SetQty"
+                },
+                {
+                  "$ref": "#/components/schemas/AcceptLine"
+                },
+                {
+                  "$ref": "#/components/schemas/DeleteLine"
+                },
+                {
+                  "$ref": "#/components/schemas/SetUnitPrice"
+                },
+                {
+                  "$ref": "#/components/schemas/SetSku"
+                },
+                {
+                  "$ref": "#/components/schemas/SetDescription"
+                },
+                {
+                  "$ref": "#/components/schemas/AddLine"
+                },
+                {
+                  "$ref": "#/components/schemas/ApplyProposal"
+                },
+                {
+                  "$ref": "#/components/schemas/DismissProposal"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "op",
+                "mapping": {
+                  "accept_line": "#/components/schemas/AcceptLine",
+                  "add_line": "#/components/schemas/AddLine",
+                  "apply_proposal": "#/components/schemas/ApplyProposal",
+                  "delete_line": "#/components/schemas/DeleteLine",
+                  "dismiss_proposal": "#/components/schemas/DismissProposal",
+                  "set_description": "#/components/schemas/SetDescription",
+                  "set_qty": "#/components/schemas/SetQty",
+                  "set_sku": "#/components/schemas/SetSku",
+                  "set_unit_price": "#/components/schemas/SetUnitPrice"
+                }
+              }
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Ops"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "draft_revision",
+          "ops"
+        ],
+        "title": "EditRequest",
+        "description": "Body of `PATCH /api/runs/{id}/bid`."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "SetDescription": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "set_description",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Description"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id",
+          "description"
+        ],
+        "title": "SetDescription"
+      },
+      "SetQty": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "set_qty",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          },
+          "sale_qty": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Sale Qty"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id",
+          "sale_qty"
+        ],
+        "title": "SetQty"
+      },
+      "SetSku": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "set_sku",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          },
+          "sku": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Sku"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id",
+          "sku"
+        ],
+        "title": "SetSku"
+      },
+      "SetUnitPrice": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "set_unit_price",
+            "title": "Op"
+          },
+          "line_id": {
+            "type": "string",
+            "title": "Line Id"
+          },
+          "unit_price_cents": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unit Price Cents"
+          },
+          "override_reason": {
+            "type": "string",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Override Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "op",
+          "line_id",
+          "unit_price_cents",
+          "override_reason"
+        ],
+        "title": "SetUnitPrice"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

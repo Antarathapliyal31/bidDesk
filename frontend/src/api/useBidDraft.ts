@@ -36,10 +36,20 @@ import {
 } from "@/lib/bidDraftReducer";
 
 import type { ApiError } from "./ApiError";
+import { isApiError } from "./ApiError";
 import type { Bid, EditOp, RepriceProposal } from "./bid";
+import { apiFetch, isFixtureMode } from "./client";
 
 const AUTOSAVE_MS = 800;
 const PATCH_LATENCY_MS = 400;
+
+// Retry policy for transport failures (network drop + 5xx). 4xx
+// errors other than 409 never retry — the request is malformed and
+// will keep 422-looping forever (see DECISIONS F13 for the real
+// bug this guards against).
+const RETRY_BASE_MS = 400;
+const RETRY_MAX_MS = 4_000;
+const RETRY_MAX_ATTEMPTS = 3;
 
 /**
  * Module-level reprice store so the fixture PATCH can resolve
@@ -72,6 +82,10 @@ export function useBidDraft(runId: string): UseBidDraftResult {
   const qc = useQueryClient();
   const [state, dispatch] = useReducer(bidDraftReducer, initialBidDraftState);
   const stateRef = useRef<BidDraftState>(state);
+  // Transport-retry bookkeeping. One attempt counter per hook
+  // instance — a 5xx or network drop backs off exponentially and
+  // gives up after RETRY_MAX_ATTEMPTS; a successful save resets it.
+  const retryAttemptRef = useRef(0);
   // Mirror state into the ref in an effect (not during render) so
   // scheduled callbacks (autosave, finalize) see the latest ops.
   useEffect(() => {
@@ -86,13 +100,18 @@ export function useBidDraft(runId: string): UseBidDraftResult {
     [],
   );
 
-  // Initial fetch (TanStack Query). The fixture returns an
-  // envelope that matches SPEC §13 `GET /api/runs/:id` — the
-  // current bid plus the agent revision 0 for diffing. Phase 5
-  // merge: swap `getFixtureBid` for `fetch`, same envelope.
+  // Initial fetch. Fixture mode resolves to a scripted envelope;
+  // real mode reads `GET /api/runs/{id}` and pulls the `bid` +
+  // `agent_bid` keys out. Shape matches `FixtureBidEnvelope`.
   const query = useQuery<FixtureBidEnvelope | null, ApiError>({
     queryKey: ["bid", runId],
-    queryFn: () => withDelay(getFixtureBid(runId), 150),
+    queryFn: async () => {
+      if (isFixtureMode()) return withDelay(getFixtureBid(runId), 150);
+      const res = await apiFetch(`/api/runs/${runId}`);
+      const detail = (await res.json()) as { bid: Bid | null; agent_bid: Bid | null };
+      if (!detail.bid || !detail.agent_bid) return null;
+      return { bid: detail.bid, agent_bid: detail.agent_bid };
+    },
     staleTime: Infinity,
     retry: false,
   });
@@ -123,24 +142,105 @@ export function useBidDraft(runId: string): UseBidDraftResult {
     const opsToSave = current.pendingOps;
     dispatch({ type: "saveStarted" });
     try {
-      // Simulate a PATCH: revision guard + apply + delay.
-      const serverBid = await withDelay(
-        applier(current.serverDraft, opsToSave),
-        PATCH_LATENCY_MS,
-      );
-      // Stale revision guard would go here in prod. Fixture
-      // mode has no concurrent writers.
+      let serverBid: Bid;
+      if (isFixtureMode()) {
+        serverBid = await withDelay(applier(current.serverDraft, opsToSave), PATCH_LATENCY_MS);
+      } else {
+        const res = await apiFetch(`/api/runs/${runId}/bid`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            draft_revision: current.serverDraft.revision,
+            ops: opsToSave,
+          }),
+        });
+        const payload = (await res.json()) as { bid: Bid };
+        serverBid = payload.bid;
+      }
       dispatch({ type: "saveSucceeded", bid: serverBid, applier });
-      // Update the cache with the new envelope. agent_bid is
-      // immutable so we reuse the previously-cached value.
+      retryAttemptRef.current = 0;
       qc.setQueryData<FixtureBidEnvelope>(["bid", runId], (prev) =>
         prev ? { ...prev, bid: serverBid } : { bid: serverBid, agent_bid: serverBid },
       );
     } catch (err) {
+      // Stale revision (409): the backend returns the server's
+      // current Bid in `details.current` — reseed the reducer so
+      // the user can redo their edit against the fresh revision.
+      if (isApiError(err) && err.code === "stale_revision") {
+        const current = (err.details as { current?: Bid } | undefined)?.current;
+        if (current) {
+          const prev = qc.getQueryData<FixtureBidEnvelope>(["bid", runId]);
+          qc.setQueryData<FixtureBidEnvelope>(["bid", runId], (p) =>
+            p ? { ...p, bid: current } : { bid: current, agent_bid: current },
+          );
+          dispatch({
+            type: "fetchSucceeded",
+            bid: current,
+            agentBid: prev?.agent_bid ?? current,
+          });
+          retryAttemptRef.current = 0;
+          return;
+        }
+      }
+      // 4xx other than 409 → the request is malformed; retrying
+      // it won't help. Surface it as `saveInvalid` so the UI can
+      // show the per-op error and the autosave debounce stops
+      // firing on these ops (they move out of `pendingOps`).
+      if (
+        isApiError(err) &&
+        err.status >= 400 &&
+        err.status < 500 &&
+        err.code !== "stale_revision"
+      ) {
+        const perOpErrors = extractPerOpErrors(err, opsToSave.length);
+        dispatch({ type: "saveInvalid", perOpErrors });
+        retryAttemptRef.current = 0;
+        return;
+      }
+      // Network drop (code === "network_error") or 5xx → honour
+      // the retry policy. Reducer's `saveTransportError` puts the
+      // ops back in `pendingOps`; here we add a backoff on top of
+      // the autosave debounce so we don't hammer the server.
+      const attempt = retryAttemptRef.current + 1;
+      if (attempt > RETRY_MAX_ATTEMPTS) {
+        retryAttemptRef.current = 0;
+        const message =
+          err instanceof Error ? err.message : "Save failed after multiple retries.";
+        dispatch({ type: "saveInvalid", perOpErrors: [{ index: -1, message }] });
+        return;
+      }
+      retryAttemptRef.current = attempt;
+      const delay = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
+      await new Promise((resolve) => setTimeout(resolve, delay));
       const message = err instanceof Error ? err.message : "Save failed";
       dispatch({ type: "saveTransportError", message });
     }
   }, [applier, qc, runId]);
+
+  // Pull per-op errors out of an `invalid_input` envelope (new
+  // RequestValidationError handler in app.api.errors — DECISIONS
+  // F13). Falls back to a single "all ops rejected" entry when
+  // the envelope doesn't carry the breakdown.
+  function extractPerOpErrors(
+    err: unknown,
+    opCount: number,
+  ): Array<{ index: number; message: string }> {
+    if (!isApiError(err)) return [{ index: -1, message: "Save failed" }];
+    const details = err.details as
+      | { ops?: Array<{ index: number | null; error: string }> }
+      | undefined;
+    if (details?.ops && details.ops.length > 0) {
+      return details.ops.map((entry) => ({
+        index: entry.index ?? -1,
+        message: entry.error,
+      }));
+    }
+    const fallback = err.message || "The server rejected the edit.";
+    return Array.from({ length: Math.max(opCount, 1) }, (_, i) => ({
+      index: i,
+      message: fallback,
+    }));
+  }
 
   // Autosave debounce. Any pendingOps → schedule a save.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -175,14 +275,23 @@ export function useBidDraft(runId: string): UseBidDraftResult {
   );
 
   const finalize = useCallback(async (): Promise<Bid | null> => {
-    // Flush any pending save first so we finalize the server
-    // state, not a stale one.
     if (stateRef.current.pendingOps.length > 0) {
       await runSave();
     }
     const current = stateRef.current;
     if (!current.serverDraft || !current.agentBid) return null;
-    const finalized = await withDelay(fixtureFinalize(current.serverDraft), 200);
+    let finalized: Bid;
+    if (isFixtureMode()) {
+      finalized = await withDelay(fixtureFinalize(current.serverDraft), 200);
+    } else {
+      const res = await apiFetch(`/api/runs/${runId}/bid/finalize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ draft_revision: current.serverDraft.revision }),
+      });
+      const payload = (await res.json()) as { bid: Bid };
+      finalized = payload.bid;
+    }
     dispatch({ type: "fetchSucceeded", bid: finalized, agentBid: current.agentBid });
     qc.setQueryData<FixtureBidEnvelope>(["bid", runId], (prev) =>
       prev ? { ...prev, bid: finalized } : { bid: finalized, agent_bid: finalized },

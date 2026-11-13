@@ -66,6 +66,19 @@ def _shape_error_to_validation_error(exc: Exception, where: str) -> ValidationEr
     )
 
 
+def steps_for_batch(batch_size: int, floor: int = 6) -> int:
+    """Scale the pricing loop's step cap with batch size.
+
+    One item = 1 query + 1 submit = 2 steps minimum, but the model
+    often refines filters once per item (+1 step/item), and up to
+    `SHAPE_ERROR_RETRIES` layers can reuse steps. `2*N + 2` with a
+    floor at `floor` gives comfortable headroom for N≤10 without
+    letting a confused model spin forever (DECISIONS F15).
+    """
+
+    return max(floor, 2 * batch_size + 2)
+
+
 @dataclass
 class _PricingHandler:
     """Carries the injected LLM + semantic bundle + catalog path
@@ -74,6 +87,8 @@ class _PricingHandler:
     llm: Any
     bundle: SemanticBundle
     catalog_db_path: Path
+    # Default floor — the real cap scales with the actual batch
+    # size at call time via `steps_for_batch`.
     max_steps: int = 6
 
     async def __call__(
@@ -111,6 +126,12 @@ class _PricingHandler:
                 skipped_results=[],
             )
 
+        # Scale the step cap with batch size. A fixed floor of 6
+        # was fine when the orchestrator batched 2–3 items at a
+        # time, but 8-item batches regularly hit the cap once the
+        # model started doing one query_catalog per item (one step
+        # per item + submit). DECISIONS F15.
+        effective_max_steps = max(self.max_steps, steps_for_batch(len(price_items)))
         try:
             outcome = await run_pricing_loop(
                 self.llm,
@@ -121,7 +142,7 @@ class _PricingHandler:
                     document_tag=f"document_{ctx.run_id}",
                     bundle=self.bundle,
                     catalog_db_path=self.catalog_db_path,
-                    max_steps=self.max_steps,
+                    max_steps=effective_max_steps,
                     feedback=feedback_errors,
                 ),
                 bus=ctx.bus,

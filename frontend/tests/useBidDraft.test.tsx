@@ -63,7 +63,7 @@ describe("useBidDraft", () => {
 
       await act(async () => {
         result.current.queueOp({
-          op: "set_quantity",
+          op: "set_qty",
           line_id: line.line_id,
           sale_qty: "999",
         });

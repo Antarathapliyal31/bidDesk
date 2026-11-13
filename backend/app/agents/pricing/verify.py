@@ -836,6 +836,26 @@ def _verify_one(
     verify_notes: list[str] = []
     if convert.note == "unit_conversion_unavailable":
         verify_notes.append("unit_conversion_unavailable")
+    if convert.note == "assumed_ea_from_countless_qty":
+        # DECISIONS F14: analyst dropped the unit on a parenthesised-
+        # count quote; code treated the extracted number as a piece
+        # count. Record a MatchAssumption so the estimator sees it's
+        # inferred, not measured. The medium-confidence cap in
+        # `convert.confidence_cap` keeps the line out of "high" but
+        # — per the decision — this note is NOT in the open-flag
+        # review-reason set (SPEC §9.3 bullet 3), so the line stays
+        # closed unless something else flags it.
+        verify_notes.append("assumed_ea_from_countless_qty")
+        assumptions.append(
+            MatchAssumption(
+                field="sale_unit",
+                value="EA",
+                reason=(
+                    f"source unit missing; treated quantity {convert.sale_qty} "
+                    f"as a piece count because the SKU is sold by the piece"
+                ),
+            )
+        )
     if length_pick_result is not None and length_pick_result.sku != proposal.sku:
         # The model's family stood; code picked the length. The
         # conversion_path from `convert_item_to_sale_qty` already
@@ -873,6 +893,7 @@ def _verify_one(
 
     # ---- Confidence (SPEC §8.3 step 8) ----
     unit_via_pint = convert.confidence_cap == "medium" and convert.note == "unit_from_pint"
+    unit_assumed_ea = convert.note == "assumed_ea_from_countless_qty"
     is_ambiguous = bool(proposal.ambiguous and proposal.ambiguous.is_ambiguous)
     if is_ambiguous and proposal.ambiguous is not None:
         verify_notes.append("ambiguous_pick")
@@ -885,6 +906,7 @@ def _verify_one(
             item_verified=item.source.verified,
             read_via=read_via,
             unit_via_pint=unit_via_pint,
+            unit_assumed_ea_from_countless_qty=unit_assumed_ea,
             is_ambiguous=is_ambiguous,
             ambiguous_reason=(proposal.ambiguous.reason if proposal.ambiguous else None),
         )

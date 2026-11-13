@@ -106,7 +106,7 @@ export function BidWorkspace({
           return;
         }
         if ((line.sale_qty ?? null) === value) return;
-        queueOp({ op: "set_quantity", line_id: lineId, sale_qty: value });
+        queueOp({ op: "set_qty", line_id: lineId, sale_qty: value });
         return;
       }
       if (field === "unit_price") {
@@ -130,7 +130,7 @@ export function BidWorkspace({
           return;
         }
         if (trimmed === line.description) return;
-        queueOp({ op: "set_description", line_id: lineId, text: trimmed });
+        queueOp({ op: "set_description", line_id: lineId, description: trimmed });
         return;
       }
       const _exhaustive: never = field;
@@ -165,7 +165,7 @@ export function BidWorkspace({
   const applyReprice = useCallback(() => {
     if (!reprice?.proposal) return;
     const op: EditOp = {
-      op: "apply_reprice",
+      op: "apply_proposal",
       line_id: reprice.proposal.line_id,
       proposal_id: reprice.proposal.proposal_id,
     };
@@ -180,7 +180,7 @@ export function BidWorkspace({
         op: "set_unit_price",
         line_id: priceOverrideLineId,
         unit_price_cents: unitPriceCents,
-        reason,
+        override_reason: reason,
       });
       setPriceOverrideLineId(null);
     },

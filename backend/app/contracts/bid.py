@@ -49,6 +49,11 @@ ReviewReason = Literal[
     "substitute",
     "in_conflict",
     "not_priced",
+    # SPEC §9.3 bullet 3 + DECISIONS F19: `classify_items` tagged
+    # the line as "ambiguous", pricing completion pass later
+    # placed a match — the open-review flag preserves the
+    # model's doubt so the estimator confirms.
+    "ambiguous",
 ]
 
 

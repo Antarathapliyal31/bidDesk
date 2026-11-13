@@ -32,6 +32,10 @@ class ConfidenceInputs:
     item_verified: bool  # ItemView.source.verified
     read_via: str | None  # "text" | "vision" | None
     unit_via_pint: bool  # True if pint fallback placed the unit
+    # True when the analyst dropped the source unit and code
+    # inferred EA from the extracted integer count (DECISIONS F14).
+    # Caps confidence at medium with an explanatory reason.
+    unit_assumed_ea_from_countless_qty: bool = False
     # Ambiguous pick (description resolves to multiple catalog
     # variants; model flagged it). Forces medium (or lower if a
     # low trigger also fires) + an explanatory reason.
@@ -82,6 +86,10 @@ def compute_confidence(inputs: ConfidenceInputs) -> ConfidenceResult:
         medium_reasons.append("Item read from a scanned page (vision)")
     if inputs.unit_via_pint:
         medium_reasons.append("Unit converted via the pint fallback")
+    if inputs.unit_assumed_ea_from_countless_qty:
+        medium_reasons.append(
+            "Source unit missing — code inferred EA from the extracted count"
+        )
     if inputs.is_ambiguous:
         reason = inputs.ambiguous_reason or "description resolves to multiple catalog variants"
         medium_reasons.append(f"Ambiguous — {reason}")

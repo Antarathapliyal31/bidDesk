@@ -97,6 +97,7 @@ export function RunPage() {
           state={state}
           connection={connection}
           projectName={projectName}
+          inputName={summary?.input_name ?? null}
         />
         <TabsContent value="live" className="flex-1">
           <LiveView state={state} pdfUrl={pdfUrl} />

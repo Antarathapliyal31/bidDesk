@@ -12,7 +12,7 @@
 import type {
   AcceptLineOp,
   AddLineOp,
-  ApplyRepriceOp,
+  ApplyProposalOp,
   Bid,
   BidLine,
   BidTotals,
@@ -21,7 +21,7 @@ import type {
   Origin,
   RepriceProposal,
   SetDescriptionOp,
-  SetQuantityOp,
+  SetQtyOp,
   SetSkuOp,
   SetUnitPriceOp,
 } from "@/api";
@@ -149,7 +149,7 @@ function bumpOrigin(current: Origin, hadValue: boolean): Origin {
 
 // ─── Op handlers ──────────────────────────────────────────────────
 
-function applySetQuantity(bid: Bid, op: SetQuantityOp): Bid {
+function applySetQty(bid: Bid, op: SetQtyOp): Bid {
   return replaceLine(bid, op.line_id, (l) => {
     const next: BidLine = {
       ...l,
@@ -168,7 +168,7 @@ function applySetUnitPrice(bid: Bid, op: SetUnitPriceOp): Bid {
     const next: BidLine = {
       ...l,
       unit_price_cents: op.unit_price_cents,
-      override_reason: op.reason,
+      override_reason: op.override_reason,
       origins: {
         ...l.origins,
         unit_price: bumpOrigin(l.origins.unit_price, l.unit_price_cents !== null),
@@ -196,7 +196,7 @@ function applySetDescription(bid: Bid, op: SetDescriptionOp): Bid {
   return replaceLine(bid, op.line_id, (l) => {
     const next: BidLine = {
       ...l,
-      description: op.text,
+      description: op.description,
       origins: {
         ...l.origins,
         description: "user_overridden",
@@ -253,7 +253,7 @@ function applyAddLine(bid: Bid, op: AddLineOp): Bid {
   return { ...bid, lines: [...bid.lines, added] };
 }
 
-function applyApplyReprice(bid: Bid, op: ApplyRepriceOp, proposal?: RepriceProposal): Bid {
+function applyApplyProposal(bid: Bid, op: ApplyProposalOp, proposal?: RepriceProposal): Bid {
   if (!proposal || proposal.line_id !== op.line_id) return bid;
   return replaceLine(bid, op.line_id, (l) => {
     const next: BidLine = {
@@ -291,8 +291,8 @@ export function applyOps(
 ): Bid {
   const next = ops.reduce<Bid>((acc, op) => {
     switch (op.op) {
-      case "set_quantity":
-        return applySetQuantity(acc, op);
+      case "set_qty":
+        return applySetQty(acc, op);
       case "set_unit_price":
         return applySetUnitPrice(acc, op);
       case "set_sku":
@@ -305,8 +305,15 @@ export function applyOps(
         return applyDelete(acc, op);
       case "add_line":
         return applyAddLine(acc, op);
-      case "apply_reprice":
-        return applyApplyReprice(acc, op, repriceStore.get(op.proposal_id));
+      case "apply_proposal":
+        return applyApplyProposal(acc, op, repriceStore.get(op.proposal_id));
+      case "dismiss_proposal":
+        // Fixture mode: the proposal store lives in useBidDraft's
+        // REPRICE_STORE; dismiss is a no-op at the bid level since
+        // the UI simply closes the reprice panel. The op still
+        // round-trips through the server in real mode so audit
+        // history captures the choice (see DECISIONS F13).
+        return acc;
       default: {
         const _exhaustive: never = op;
         return _exhaustive;

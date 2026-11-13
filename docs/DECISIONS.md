@@ -1016,6 +1016,513 @@ PDFs. The chip makes this explicit; the test
 renders the Live view"). Phase 5 merge deletes the fallback
 along with the SSE registry and `pdfRunUrl.ts`.
 
+## F11. Frontend wired to the real backend (hookup branch) — 2026-11-12
+
+Decision: Promote every data hook off its fixture `queryFn` and
+onto the real backend over the Vite proxy. `VITE_FIXTURES=1` keeps
+the fixture path alive for the vitest suite and Playwright e2e.
+
+Path map (all exist in `frontend/openapi.json`):
+- `useCreateRun` → `POST /api/runs`
+- `useRuns` → `GET /api/runs`
+- `useRunSummary`, `useBidDraft` initial fetch → `GET /api/runs/{id}` (nested `input/project/branch`, flattened at the hook boundary)
+- `useRunStream` → `EventSource('/api/runs/{id}/stream')` — one connection does replay + live; no separate `/events` call (would double-deliver)
+- `useBidDraft` save → `PATCH /api/runs/{id}/bid` (409 `stale_revision` reseeds the reducer from `details.current`)
+- `useBidDraft` finalize → `POST /api/runs/{id}/bid/finalize`
+- `useBranches` → `GET /api/branches`
+- `useFaults` → `GET /api/meta` (maps `demo_faults_enabled` → `enabled`)
+- `pdfRunUrl` → `GET /api/runs/{id}/source.pdf`
+
+Contract files: `make gen-api` dumps `FastAPI.openapi()` →
+`frontend/openapi.json` → `openapi-typescript` →
+`frontend/src/api/schema.gen.ts`. `make check-contract` regenerates
+to scratch files and fails on drift.
+
+Response typing — honest status: request bodies, path parameters,
+and operation names are generated from OpenAPI; **response shapes
+are still hand-typed** in `src/api/bid.ts`, `src/api/events.ts`,
+and a few hook-local interfaces (`RunDetailResponse`,
+`MetaResponse`) because the backend's `GET` routes return
+`dict[str, object]` without `response_model=`. The schema.gen
+generator sees those as `{ [key: string]: unknown }`, so there's
+nothing yet to pin against. Adding `response_model=` to each
+backend `GET` is the next step and will let the hand-written types
+shrink to thin pass-throughs.
+
+Dep add: `openapi-typescript@7.13.0` as a frontend devDependency.
+Its TypeScript peer is `^5` while this project is on TS 6, so
+`package.json` carries an `"overrides"` entry resolving its TS
+peer to `$typescript` (the project's TS 6). Verified clean
+install: `rm -rf node_modules && npm ci` succeeds with no
+ERESOLVE. Upstream TS 6 support isn't released yet; revisit the
+override when `openapi-typescript` publishes a version that lists
+TS 6 as a supported peer.
+
+Because: the backend is feature-complete for the frontend's needs
+(Phase 5b API + SSE + atomic PATCH + run-id-scoped bid ids). The
+`transition state` wording in README and the "Phase 5 merge
+deletes …" breadcrumbs in hook docstrings no longer match
+reality — the hooks ARE the merged state.
+
+F10 resolution: `BidLine.match.status === "needs_review"` renders
+the amber "Needs review" pill in `BidLineRow`'s `StatusChip`
+(Phase 8 already landed this). The matching `PricedLineView.status`
+union in `src/api/events.ts` now also includes `"needs_review"` and
+`ItemsStream.PricedCell` renders the same pill for the live view.
+A reducer test (`runReducer.test.ts` → "replay-then-live delivery
+with overlapping ids yields no duplicate state") locks the dedup
+invariant that lets us use one SSE connection for both replay and
+live without worrying about overlap.
+
+Trade-off: with the backend returning `dict[str, object]`, a
+backend-side shape change can land without a type error at the
+hook boundary. Mitigated at the user-visible surface (reducer
+validators, Zod on forms, test coverage), but the next step
+(adding `response_model=`) closes the gap.
+
+## F12. Orchestrator fans out Live-view events — 2026-11-12
+
+Decision: The orchestrator emits the per-item / per-page SSE events
+the Live view listens for. Before this entry, `/stream` only
+carried `run.started`, `span.*`, `tool.*`, `bid.ready`,
+`run.finished` — so ItemsStream, the live priced-line grid, and
+the conflict chip stayed empty during a real run (data was
+reachable only by parsing stringified `tool.result` previews).
+
+What now fires, and from where:
+
+- `page.routed` (one per analyst page_route entry) and
+  `item.extracted` (one per analyst item) — emitted in
+  `orchestrator/loop.py:run_orchestrator`, right after the analyst
+  delegate returns and before the model loop opens. Payloads are
+  `{page_no, route}` and `{item: ItemView}` per SPEC §10.3.
+- `item.priced` — one per priced row inside
+  `orchestrator/tools.py:_price_one_batch`, emitted AFTER
+  `repo.insert_price_result` commits. Payload wraps a full
+  `PricedLineView` (including `is_substitute` + `substitute_reason`
+  so the Live view's substitute badge can light up before
+  `bid.ready`).
+- `conflict.flagged` — one per accepted `handle_flag_conflict`
+  call, after `repo.insert_conflict` commits. Payload is the
+  `ConflictView` shape (`id`, `type`, `side_a`, `side_b`,
+  `explanation`).
+- `item.flagged` — mirrored onto each conflict side (reason_code
+  `in_conflict`), and emitted off priced rows for `failed` /
+  `timeout` / `no_match` / `needs_review` / `substitute` /
+  `shortfall` / `low_confidence` / `not_priced:*`. One reason per
+  row, priority matches SPEC §9.3 bullet 3.
+
+Scope guardrail: only `backend/app/agents/orchestrator/*` and
+`backend/app/contracts/pricing.py` changed. The analyst module
+(`backend/app/agents/analyst/*`) is untouched because another
+session is editing it in parallel. The orchestrator reads
+`analyst_result["page_routes"]` and fans out — it does NOT demand
+the analyst emit events itself.
+
+Contract change: `PricedLineView` grew two defaulted fields,
+`is_substitute: bool = False` and `substitute_reason: str | None
+= None`, to match `frontend/src/api/events.ts`. Defaults preserve
+backward compat for the 20 test sites that build non-substitute
+baselines (full backend suite stayed green after adding them).
+
+Persist-then-publish: every new emit goes through `EventBus.emit`,
+which validates against `RunEventAdapter` pre-persist and only
+publishes on a clean commit — a mid-handler exception never
+leaks half an event. The SSE route (`api/runs.py`) is unchanged;
+the frontend's named-event listeners (added in the last round)
+pick these up via `addEventListener(type, …)`.
+
+Tests: `backend/tests/agents/orchestrator/test_live_events.py` —
+five FakeLLM-scripted cases covering (a) full-loop event
+presence + ordering (`item.extracted` × 2 before `item.priced` × 2
+before `bid.ready`), (b) `item.extracted` payload shape vs
+ItemView, (c) `item.priced` payload shape vs PricedLineView
+including the defaulted substitute fields, (d) `conflict.flagged`
++ `item.flagged(in_conflict)` fan-out from `handle_flag_conflict`,
+(e) vision-side conflicts route to contractor_questions and emit
+NEITHER event.
+
+Alternatives considered: (a) parse `tool.result.result_preview`
+on the frontend — rejected: previews are truncated and labelled
+"preview" for a reason; the backend already has the typed data.
+(b) move the fan-out into `agents/analyst/*` — rejected: scope
+collision with the parallel analyst session, and the orchestrator
+is the correct owner because it decides when the analyst is
+authoritative. (c) add response_model= to GETs so the generated
+OpenAPI types shrink — deferred (F11 next step), orthogonal.
+
+Trade-off: the orchestrator now writes one more event per
+item/page/priced-line/conflict; on an rfp_messy run that's ~60
+extra events. `events` table is already indexed on `(run_id, id)`
+and the SSE replay drains them in one query, so the cost is
+negligible.
+
+Still NOT emitted (reported for the user to decide):
+
+| Type | What listens | UI effect of absence |
+|---|---|---|
+| `run.status` | `runReducer` updates `currentStep` label | Trace / header "current step" stays blank |
+| `agent.activity` | TraceView agent activity lane | No short status strings between tool calls |
+| `retry.scheduled` | TraceView retry chip on a span | Retries aren't visible mid-run |
+| `validation.failed` | TraceView validation-boundary chip | Boundary failures land in `tool.result(ok=false)` only |
+| `budget.exhausted` | LiveView BudgetNotice banner | Soft budget trips still fire this; the five `bus.emit` sites in `loop.py` cover the hard-trip paths |
+
+For the first four, only `runtime/trace.py` (span-level) and
+`runtime/retry.py` (retry/validation) know when to fire them —
+not the orchestrator — so leaving them is correct for this
+scope.
+
+## F13. EditOp discriminator mismatch, 422 envelope, retry policy — 2026-11-12
+
+Decision: Three coordinated fixes after a manual e2e on
+`run_14716172` found PATCH loops and empty-cell lumber lines.
+
+**Op discriminator drift (the real bug behind the UI 422 loop).**
+The frontend sent `op: "set_quantity"` + `op: "apply_reprice"`;
+the backend's `EditRequest` (and `docs/API_CONTRACT.md`) pin them
+as `set_qty` / `apply_proposal` / `dismiss_proposal` — every save
+rejected at 422, and the autosave debounce re-fired every 800 ms
+because `saveTransportError` kept the rejected ops in
+`pendingOps`. Two other quieter mismatches surfaced at the same
+time: `SetUnitPriceOp.reason` (backend wants `override_reason`)
+and `SetDescriptionOp.text` (backend wants `description`).
+
+Fixes landed:
+- Rewrote `src/api/bid.ts` to mirror backend discriminators and
+  field names exactly (`SetQtyOp`, `ApplyProposalOp`, new
+  `DismissProposalOp`; `override_reason`, `description`). Updated
+  every call site (`BidWorkspace`, `dev-fixtures/bid`, tests).
+- Shared JSON fixture at `docs/edit_op_fixtures.json` — one
+  canonical body per op. `backend/tests/contracts/test_edit_ops_fixture.py`
+  parses each entry with the real `EditRequest`;
+  `frontend/tests/editOpContract.test.ts` loads the same file and
+  compile-time-assigns each body to `EditOp`. Any rename on
+  either side fails both suites at CI.
+
+**SPEC §13 envelope for `RequestValidationError`.** Before: the
+backend only wrapped `ApiError` subclasses; FastAPI's own
+`RequestValidationError` leaked through as the raw `detail` array,
+so `apiErrorFromResponse` on the frontend saw an unknown shape
+and collapsed to `server_error`. New handler in
+`backend/app/api/errors.py` renders the SPEC envelope
+`{error: {code: "invalid_input", message, details.ops}}` where
+`details.ops` is a `[{index, error}, …]` grouping — op-scoped
+errors get their array index, non-op errors (e.g. missing
+`draft_revision`) land under `index: null`. Covered by three new
+tests in `tests/api/test_error_handlers.py`.
+
+**Retry policy (no more 422 loop).** `useBidDraft.runSave` now
+branches on the error:
+- 409 `stale_revision`: reseed the reducer from `details.current`,
+  reset attempt counter. (Already shipped, kept.)
+- 4xx otherwise: `dispatch({type: "saveInvalid", perOpErrors})`.
+  The reducer now drops `inFlightOps` on `saveInvalid` so the
+  autosave debounce can't re-fire the same malformed body. The
+  envelope's `details.ops` flows straight into
+  `error.perOpErrors`; a missing breakdown degrades to one
+  "server rejected the edit" entry per queued op.
+- 5xx / network: `saveTransportError` (reducer puts ops back
+  into `pendingOps`), guarded by exponential backoff capped at
+  3 attempts / 4 s. After the last attempt, we surface a
+  terminal invalid-shape error so the UI has something to show.
+
+Alternatives considered: (a) make the backend accept both
+`set_quantity` and `set_qty` — rejected: permissive endpoints
+swallow drift silently and the SPEC/API_CONTRACT is already
+pinned. (b) retry the 4xx anyway with an attempt cap — rejected:
+if the body is wrong-shaped, retrying buys nothing but noise
+and flashes the error banner three extra times at the user.
+(c) switch frontend to generated `EditRequest` type from
+`schema.gen.ts` — the TypeAdapter forward-ref issue on the
+discriminated union (same one that broke `EditRequest = Body(...)`
+in a test) means the generator inlines it as `unknown`; revisit
+when that upstream lands.
+
+Trade-off: the backend's new 4xx envelope changes what the UI
+sees on every validation failure (used to be FastAPI's raw
+`detail`). Only call sites that read `err.details.detail` would
+break — none exist; `apiErrorFromResponse` + `messageForError`
+already treat details as a loose record.
+
+## F14. Pricing converter: unit-less EA fallback — 2026-11-12
+
+Decision: When the analyst leaves `unit_raw=None` on a line that
+the pricing agent matched to an EA-sold SKU AND the extracted
+`quantity_text` parses as a positive whole integer, the converter
+in `backend/app/catalog/units.py` treats the number as a piece
+count instead of bailing to `unit_conversion_unavailable`. It
+records a `MatchAssumption(field="sale_unit", value="EA", …)`,
+caps confidence at medium with a new `confidence.unit_assumed_ea_from_countless_qty`
+signal, and emits `verify_notes = ["assumed_ea_from_countless_qty"]`.
+The note is intentionally NOT in SPEC §9.3 bullet 3's open-flag
+set — the estimator sees the assumption via the medium-confidence
+chip + assumption list, but the line isn't blocked from finalize.
+
+Scope: the fallback fires only when all three hold — `unit_raw is
+None`, `sale_unit == "EA"`, and `item_qty == item_qty.to_integral_value()`.
+Decimal qty (e.g. `12.5`) and non-EA sale units (`SHT`, `BAG`,
+`ROLL`) stay on the old failure path; those really need a unit
+to make sense.
+
+Because: the analyst dropped the unit on `(100) 2x4 x 8' SPF #2`
+style quotes (verified on `run_14716172` — items 1/2/3 had
+`quantity_text="100"/"40"/"20"` and `unit_raw=NULL`). On these
+lines the extracted number IS the piece count — the orchestrator
+shouldn't be the place that pretends we don't know that. The
+analyst module is off-limits this round (another session owns
+it), so the fix lives in pricing's converter. If the analyst
+starts tagging "pcs" correctly, the fallback never fires: the
+earlier identity-passthrough branch takes over (`item_unit` is
+set, equal to `"EA"`).
+
+Verified against `samples/expected/rfp_messy.json` lines 1–3
+(`quantity_text="100"/"40"/"20"`, expected SKUs
+`LUM-2X4-8-SPF-2 / LUM-2X6-16-SYP-2-PTAG / LUM-2X10-18-SPF-2`) —
+with the fallback applied, `sale_qty` matches the expected count
+on each. Previously those three cells rendered "—" in the UI.
+
+Tests added to `tests/catalog/test_units.py`:
+`TestAssumedEaFromCountlessQty` — whole-int + EA falls back (new
+behaviour), decimal still fails, non-EA sale units still fail,
+`unit_raw` set-but-unrecognisable (e.g. `"meters"`) still fails
+(so a stray un-normalisable unit can't accidentally pretend to
+be a piece count).
+
+Alternatives considered: (a) fix the analyst — correct but
+blocked by the ownership split; will revisit once that session
+lands and remove the fallback if the analyst becomes reliable.
+(b) emit `item.flagged(reason_code="unknown_unit")` and leave
+`sale_qty=None` — honest but makes items 1/2/3 unfinalizable and
+needs an estimator click per line for a case the code CAN
+resolve safely. (c) add `UNKNOWN_UNIT` to ReviewReason — same
+downside, more schema changes.
+
+## F15. Pricing step cap scales with batch size — 2026-11-12
+
+Decision: The pricing loop's `max_steps` now scales with the
+batch size via `steps_for_batch(n) = max(6, 2*n + 2)`. The
+orchestrator's `_PRICING_BATCH_SIZE` drops from **8 → 4** so one
+batch can't take 8 query_catalog turns in the first place.
+`_run_completion_pass` now treats items whose first-pass
+`price_results` row carries `max_steps_exceeded` / `agent_error`
+/ `not_priced:*` as retry-eligible, and prices them **one item
+per batch** so each gets the full step cap to itself.
+
+Because: `run_9534f056` had 8 items fail with
+`max_steps_exceeded` on the second `price_items`. One
+`delegate.pricing_agent` batch ran 20 s and spun 6 query_catalog
+turns without reaching `submit_matches`; the cap tripped. The
+old `pricing_completion_pass` only looked at items with NO price
+row, so the max_steps items (which DO get a failed row written)
+were invisible to it. Smaller batches × per-item retries recover
+the flaky case.
+
+Tests: `tests/agents/pricing/test_extraction.py` gained
+`TestStepsForBatch` — unit test for the scaling formula, plus
+two 8-item FakeLLM scripts that (a) complete under the new cap
+and (b) still fail under the old `max_steps=6` to pin the
+regression. `tests/agents/orchestrator/test_completion_pass.py`
+is new and asserts a `max_steps_exceeded` row is picked up for
+retry and the second pass turns it into a `matched` row.
+
+Trade-off: 4-item batches mean roughly 2× the LLM calls per run.
+The concurrency cap (semaphore 2) keeps wall-clock steady. On an
+rfp_messy run (~24 priceable items) that's 6 batches at 2 at a
+time ≈ 3 round-trips, vs 3 batches ≈ 1.5 round-trips before. The
+10-step floor per 4-item batch covers one query per item + one
+retry per item + submit with comfortable headroom.
+
+## F16. Product gap rules are MATERIAL-only — 2026-11-12
+
+Decision: Rule-evaluation sites in `agents/orchestrator/tools.py`
+(`apply_rule_questions`, `apply_rule_requirements`,
+`handle_check_gap_rules`) now skip items whose `kind != "material"`
+before running the gap-rule matcher. Exclusions / labor / notes /
+unreadable lines share `_infer_specs` with materials for their
+display metadata, but they must not trigger product-shape rules.
+
+Because: on `run_9534f056` the exclusion "Insulation by others"
+(kind=exclusion) had its category inferred as `insulation` by
+the keyword matcher and `r_value=None`, which matched
+`insulation_r_value_missing.missing_condition.is_null`. The rule
+went into `fired_question_rule_ids`, the model's question
+validated, and the contractor got asked "which R-value for this
+insulation we're not supplying" — nonsense. The actual
+insulation lines ("R-19 insulation", "R-30 insulation for
+attic", "R-13 insulation for 2x4 walls") correctly had r_value
+inferred and did NOT trip the rule — the inference was fine;
+scope was wrong.
+
+Tests: `test_tools.py` → `TestRValueInferenceAndMaterialOnly`.
+Three cases: regex covers R-13 / R-19 / R-30 / "R19" / "R 30";
+the rule does not fire for a material insulation item with
+R-value in text; the rule does not fire for an exclusion item
+with no R-value.
+
+Trade-off: a `kind=note` line that happens to describe a real
+insulation gap won't trigger a rule-authored question anymore.
+That's intentional — if the line wasn't extracted as
+`kind=material`, the analyst already decided it's not a
+pricable item; the question path can still come from the
+model's own `add_requirements` + submit_bid flow.
+
+## F17. flag_conflict rejects self-conflict (same page + quote) — 2026-11-12
+
+Decision: `handle_flag_conflict` now returns
+`{"ok": true, "routed": "contractor_question", "reason":
+"self_conflict"}` when both sides cite the same `page` AND the
+same stripped `quote`, AND registers a synthetic question_ref_id
+in `fired_question_rule_ids` so the model can basis a
+contractor_question against it. No conflict row is written.
+
+Because: on `run_9534f056` the model submitted `flag_conflict`
+with item_4 on both sides (same page, same quote) — "a line
+against itself". That isn't a genuine spec contradiction between
+two statements; it's "I'm unsure about this one line" and
+belongs in contractor_questions. The old handler accepted it,
+wrote a conflict row, and both sides ended up flagged
+`in_conflict` for the same reason.
+
+Tests: `test_tools.py` → `TestFlagConflictSelfConflict`. One
+case for same page + same quote (routes to question, no row),
+one for same page + distinct quotes (persists as a real
+conflict — the common "spec says A on line 1, schedule says B on
+line 7" case must keep working).
+
+Trade-off: the model occasionally wants to flag "I see two
+copies of the same spec on the same page" — that's a genuine
+duplicate, not a self-conflict. Under this guard that collapses
+to a question. Acceptable: the model can still submit it with
+different item_ids on the two sides if it truly means two
+distinct line items.
+
+## F18. Report-only: run_14716172 MR drywall + fascia misses — 2026-11-12
+
+Reported (no code fix this round). Both items came back without
+a priced SKU after the orchestrator finished:
+
+**item_10 "1/2 in drywall for upstairs bathrooms" — status
+no_match despite catalog containing `DRY-1_2-48X96-MR`.**
+Root cause: `knowledge/gap_rules.yaml` → `wet_area_drywall_mr.requirement`
+carries `value: 1` (int) for a `moisture_resistant` field that
+`semantic/products.yaml` declares as `type: bool`. Code merges
+the requirement into the pricing query filter via
+`extraction._merge_requirements` as-is → the semantic layer
+rejects the int-against-bool match, candidates come back empty,
+`verify.py` treats empty-candidates + sku=None as a legitimate
+no_match (per the `TestNoMatch` contract in `test_verify.py`).
+
+Two possible fixes, both out of scope for this round:
+- YAML: change `value: 1` → `value: true` in `wet_area_drywall_mr`.
+- Code: coerce bool-typed fields in `_merge_requirements`
+  (`int(1)` → `True`, `int(0)` → `False`). Belt-and-braces.
+
+**item_17 "Fascia (1x6 trim), 12 yards" — never priced.**
+Root cause: the orchestrator's `classify_items` call put item_17
+in `category: ambiguous` with reason "Fascia 1x6 trim quantity
+in yards is not a lumber unit; needs LF/pieces confirmation".
+`_run_completion_pass` only retries `None` / `"price"` triage
+categories — `ambiguous` items are skipped. In fact 12 yards is
+pint-convertible (12 yd → 36 ft → 5 × 8 ft trim pieces,
+matching `TRM-1X6-8-SPF-2` per `samples/expected/rfp_messy.json`
+line 17).
+
+Three possible fixes, all out of scope for this round:
+- Teach the classify_items prompt that pint-convertible linear
+  units (yards, meters) on trim/lumber are `price`-able.
+- `_run_completion_pass` re-tries `ambiguous`-triaged material
+  items with a single-item batch (same pattern as F15's
+  max_steps retry).
+- Add a code-side pre-triage pass that flips `ambiguous` →
+  `price` when `unit_raw` normalizes via pint.
+
+## F19. MR drywall requirement: YAML fix + bool coercion — 2026-11-12
+
+Decision: Two coordinated fixes so a `moisture_resistant`
+requirement reaches `DRY-1_2-48X96-MR`.
+
+- `knowledge/gap_rules.yaml::wet_area_drywall_mr.requirement.value`:
+  `1` → `true`. The field is typed `bool` in
+  `semantic/products.yaml`; the YAML int form worked at a human
+  glance but the semantic layer's query builder matched bool
+  columns against the boolean literal, not `1`.
+- `agents/pricing/extraction.py::_merge_requirements` now takes
+  an optional `product_field_types` map and coerces values for
+  fields typed `bool`: `1/0` → `True/False`, `"true"/"false"` →
+  `True/False`. Belt-and-braces so a future YAML author can't
+  retrip the same bug.
+
+Because: on `run_14716172`'s `item_10` ("1/2 in drywall for
+upstairs bathrooms, 800 sq ft"), code applied the MR requirement
+to `item_requirements`, but the pricing agent's `query_catalog`
+filter — `{category: "drywall", thickness_in: "1/2",
+moisture_resistant: 1}` — returned zero rows against a bool
+column. Verify.py then saw empty candidates + sku=None and
+followed the legitimate-no_match contract, so the user saw "MR
+drywall not found" despite the catalog carrying it.
+
+Tests:
+- `test_extraction.py::TestMergeRequirementsCoerceFunctions` —
+  unit tests for `_coerce_requirement_value` (int 1 / 0 /
+  strings / bool pass-through / non-bool fields untouched).
+- `test_extraction.py::TestMergeRequirementsBoolCoercion` —
+  end-to-end FakeLLM run: `RequirementSpec(field="moisture_resistant",
+  value=1)` on a "1/2 drywall" item, model queries without the
+  MR filter; coercion adds `moisture_resistant: True` and the
+  candidate set now contains `DRY-1_2-48X96-MR` → submit_matches
+  lands.
+
+Trade-off: the coercion is scoped to `bool` fields. Int-vs-int-
+with-enum-values and other type mismatches still fail noisily
+at the semantic layer, which is the right surface for those —
+they usually mean the YAML author chose the wrong value, not
+the wrong type.
+
+## F20. Ambiguous-triaged items get a completion-pass retry + open review — 2026-11-12
+
+Decision: `_run_completion_pass` now treats triage category
+`"ambiguous"` as retry-eligible (alongside `None` and `"price"`).
+Material items that classify_items parked as ambiguous get a
+one-item batch with the full step cap. When pricing succeeds
+the line keeps `review.state = "open"` with reason `"ambiguous"`
+— `_review_reasons_for` now reads the triage row and appends
+`"ambiguous"` whenever the triage category is `"ambiguous"`,
+regardless of how the pricing turned out. Code must not
+silently clear the model's doubt.
+
+Supporting changes:
+- `ReviewReason` in `backend/app/contracts/bid.py` gains
+  `"ambiguous"`.
+- `ReviewReasonCode` in `frontend/src/api/bid.ts` gains
+  `"ambiguous"`.
+- `_line_from` in `agents/.../assemble.py` now threads
+  `triage_by_item[iid]` into `_review_reasons_for`.
+
+Because: on `run_14716172`'s `item_17` ("Fascia (1x6 trim), 12
+yards"), `classify_items` tagged the line `ambiguous` with
+reason "quantity in yards is not a lumber unit; needs LF/pieces
+confirmation". The pre-F20 completion pass skipped it entirely.
+12 yards IS pint-convertible (12 yd → 36 ft → 5 × 8 ft, which
+matches `TRM-1X6-8-SPF-2` per `samples/expected/rfp_messy.json`
+line 17); the pricing agent's existing pint fallback would have
+succeeded if it had been given the item.
+
+Tests: `test_completion_pass.py::TestCompletionPassRetriesAmbiguousItems`
+seeds a fascia item + ambiguous triage, scripts the pricing
+agent to submit `TRM-1X6-8-SPF-2`, and asserts (a) the row
+status turns `matched` with the right SKU, (b) the assembled
+BidLine has `review.state == "open"` with `"ambiguous"` in its
+reasons.
+
+Trade-off: an item the orchestrator CORRECTLY priced via
+completion pass still shows up in the review queue. That's
+intentional — the model's classify step saw enough reason to
+flag it, and the estimator should confirm the inferred
+quantity/length once. If a pattern emerges where ambiguous
+retries never need confirmation (e.g. all pint-convertible
+trim), the fix is in `classify_items` (teach the triage prompt
+to call these `price`), not in silently dropping the flag.
+
 ---
 
 ## Superseded notes

@@ -57,9 +57,8 @@ describe("apiErrorFromResponse", () => {
   });
 
   it("falls back to server_error for non-JSON body (HTML 500)", async () => {
-    // SPEC §13: any HTTP 500, regardless of body, maps to
-    // server_error with the canonical message. raw_code=null
-    // because the body wasn't a parseable envelope.
+    // Bare 500s (no envelope) map to server_error — distinguishes
+    // an upstream proxy error from a backend-emitted `internal_error`.
     const htmlRes = new Response("<html><body>Internal Server Error</body></html>", {
       status: 500,
       headers: { "content-type": "text/html" },
@@ -67,8 +66,6 @@ describe("apiErrorFromResponse", () => {
     const e = await apiErrorFromResponse(htmlRes);
     expect(e.code).toBe("server_error");
     expect(e.status).toBe(500);
-    expect(e.message).toBe("Something went wrong on our end.");
-    expect(e.details).toEqual({ raw_code: null });
   });
 
   it("maps a bare HTTP 413 (no envelope) to too_large", async () => {
@@ -98,10 +95,10 @@ describe("apiErrorFromResponse", () => {
     expect(e.status).toBe(0);
   });
 
-  it("HTTP 500 with code internal_error maps to server_error locally", async () => {
-    // The backend emits `internal_error` on 500 (SPEC §13). The
-    // client folds any 500 into `server_error` so the UI only
-    // needs one 500-shaped error state.
+  it("HTTP 500 with a well-formed internal_error envelope surfaces internal_error", async () => {
+    // The backend emits `internal_error` on 500 (SPEC §13); when the
+    // envelope is parseable we surface it so incident triage can
+    // distinguish a backend throw from an upstream proxy error.
     const e = await apiErrorFromResponse(
       jsonRes(500, {
         error: {
@@ -110,21 +107,18 @@ describe("apiErrorFromResponse", () => {
         },
       }),
     );
-    expect(e.code).toBe("server_error");
+    expect(e.code).toBe("internal_error");
     expect(e.status).toBe(500);
     expect(e.message).toBe("Something went wrong on our end.");
-    expect(e.details).toEqual({ raw_code: "internal_error" });
   });
 
-  it("HTTP 500 with any other envelope code still maps to server_error", async () => {
-    // Belt + braces: even if the backend ever emits a different
-    // code on 500 (bug or regression), the client collapses it.
+  it("HTTP 500 with an unknown envelope code falls back to server_error", async () => {
     const e = await apiErrorFromResponse(
       jsonRes(500, { error: { code: "unknown_future_code", message: "x" } }),
     );
     expect(e.code).toBe("server_error");
     expect(e.status).toBe(500);
-    expect(e.details).toEqual({ raw_code: "unknown_future_code" });
+    expect(e.details?.raw_code).toBe("unknown_future_code");
   });
 
 });

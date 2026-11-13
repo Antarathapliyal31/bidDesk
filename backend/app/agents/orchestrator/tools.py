@@ -364,11 +364,18 @@ async def apply_rule_questions(ctx: OrchestratorContext) -> list[dict[str, Any]]
     seen_bid_rule_ids: set[str] = set()
 
     # Build the merged view per item for bid-scope matching.
+    # Product-category gap rules (`insulation_r_value_missing`,
+    # `drywall_thickness_missing`, etc.) are MATERIAL-only — an
+    # exclusion line like "Insulation by others" infers
+    # category=insulation from its wording and would falsely fire
+    # the rule otherwise (DECISIONS F16).
     merged_views: list[dict[str, Any]] = []
     for iid, item in ctx.items_by_id.items():
         view = _item_dict_for_matcher(item, triage_by_item.get(iid))
         view = _merge_requirements_into_item_view(view, reqs_by_item.get(iid, []))
         merged_views.append(view)
+        if item.get("kind") != "material":
+            continue
         # Item-scope QUESTION rules fire per item.
         context_text = item.get("source_quote") or ""
         for rule in ctx.gap_rules:
@@ -455,6 +462,9 @@ async def handle_check_gap_rules(
     item_rules_payload: list[dict[str, Any]] = []
     for iid in target_ids:
         if iid not in ctx.items_by_id:
+            continue
+        # Product-category item rules are MATERIAL-only — see F16.
+        if ctx.items_by_id[iid].get("kind") != "material":
             continue
         reqs, questions = _apply_item_rules(ctx, ctx.items_by_id[iid], triage_by_item.get(iid))
         if not (reqs or questions):
@@ -657,6 +667,9 @@ async def apply_rule_requirements(ctx: OrchestratorContext) -> dict[str, Any]:
 
     entries: list[AddRequirementEntry] = []
     for iid, item in ctx.items_by_id.items():
+        # Product-category item rules are MATERIAL-only (F16).
+        if item.get("kind") != "material":
+            continue
         reqs, _questions = _apply_item_rules(ctx, item, triage_by_item.get(iid))
         for rule in reqs:
             ctx.fired_requirement_rule_ids.add(rule.id)
@@ -693,7 +706,11 @@ async def apply_rule_requirements(ctx: OrchestratorContext) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-_PRICING_BATCH_SIZE = 8
+# Smaller batches = more parallel calls, fewer items per step cap.
+# 8 items in one batch regularly hit the pricing loop's `max_steps`
+# once the model does one query_catalog per item (DECISIONS F15).
+# 4 items × `steps_for_batch(4)=10` steps = comfortable headroom.
+_PRICING_BATCH_SIZE = 4
 _PRICING_CONCURRENCY = 2
 
 
@@ -780,6 +797,19 @@ async def _price_one_batch(
                 created_at=now,
             )
             ctx.priced_item_ids.add(req.item.id)
+            # Live view listens for `item.priced` — emit the failure
+            # view so the row flips to its "Failed" chip.
+            await _emit_item_priced_failure(ctx.bus, run_id=ctx.run_id, item_id=req.item.id)
+            await ctx.bus.emit(
+                type="item.flagged",
+                run_id=ctx.run_id,
+                agent=AgentName.orchestrator,
+                payload={
+                    "item_id": req.item.id,
+                    "reason_code": "failed",
+                    "message": "pricing agent failed",
+                },
+            )
             out.append({"item_id": req.item.id, "status": "failed"})
         return out
 
@@ -819,6 +849,26 @@ async def _price_one_batch(
             ctx.db, run_id=ctx.run_id, item_id=iid, row=row, created_at=now
         )
         ctx.priced_item_ids.add(iid)
+        # Fan out to the Live view AFTER the row commits (one event
+        # per line, matches the SPEC §10.3 `item.priced` payload
+        # and `src/api/events.ts` PricedLineView).
+        await _emit_item_priced_from_row(ctx.bus, run_id=ctx.run_id, item_id=iid, row=row)
+        # Reason-code fan-out. The frontend derives `review.state`
+        # from BidLine at bid-ready time; emitting `item.flagged`
+        # mid-run lets the Live view surface the same amber chip
+        # the moment the problem is known.
+        flagged_reason = _item_flag_reason_from_row(row)
+        if flagged_reason is not None:
+            await ctx.bus.emit(
+                type="item.flagged",
+                run_id=ctx.run_id,
+                agent=AgentName.orchestrator,
+                payload={
+                    "item_id": iid,
+                    "reason_code": flagged_reason,
+                    "message": None,
+                },
+            )
         out.append(
             {
                 "item_id": iid,
@@ -831,6 +881,104 @@ async def _price_one_batch(
             }
         )
     return out
+
+
+def _extended_cents_from_row(row: dict[str, Any]) -> int | None:
+    from decimal import Decimal, InvalidOperation
+
+    from app.contracts.bid import extended_cents_of
+
+    qty = row.get("sale_qty")
+    upc = row.get("unit_price_cents")
+    if qty is None or upc is None:
+        return None
+    try:
+        return extended_cents_of(Decimal(str(qty)), int(upc))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+async def _emit_item_priced_from_row(
+    bus: EventBus, *, run_id: str, item_id: str, row: dict[str, Any]
+) -> None:
+    """Build a PricedLineView-shaped payload from the stored row."""
+
+    payload = {
+        "line": {
+            "item_id": item_id,
+            "status": row.get("status") or "failed",
+            "sku": row.get("sku"),
+            "product_name": row.get("product_name"),
+            "sale_qty": row.get("sale_qty"),
+            "sale_unit": row.get("sale_unit"),
+            "unit_price_cents": row.get("unit_price_cents"),
+            "extended_cents": _extended_cents_from_row(row),
+            "conversion_path": row.get("conversion_path"),
+            "confidence": row.get("confidence"),
+            "confidence_reasons": list(row.get("confidence_reasons") or []),
+            "shortfall": row.get("shortfall"),
+            "is_substitute": bool(row.get("is_substitute", False)),
+            "substitute_reason": row.get("substitute_reason"),
+        }
+    }
+    await bus.emit(
+        type="item.priced",
+        run_id=run_id,
+        agent=AgentName.pricing_agent,
+        payload=payload,
+    )
+
+
+async def _emit_item_priced_failure(bus: EventBus, *, run_id: str, item_id: str) -> None:
+    """Minimal `item.priced` for the handler-level failure path."""
+
+    await bus.emit(
+        type="item.priced",
+        run_id=run_id,
+        agent=AgentName.pricing_agent,
+        payload={
+            "line": {
+                "item_id": item_id,
+                "status": "failed",
+                "sku": None,
+                "product_name": None,
+                "sale_qty": None,
+                "sale_unit": None,
+                "unit_price_cents": None,
+                "extended_cents": None,
+                "conversion_path": None,
+                "confidence": "low",
+                "confidence_reasons": ["pricing agent failed"],
+                "shortfall": None,
+                "is_substitute": False,
+                "substitute_reason": None,
+            }
+        },
+    )
+
+
+def _item_flag_reason_from_row(row: dict[str, Any]) -> str | None:
+    """Map a priced row to the single review reason the Live view
+    should surface mid-run. Priority matches SPEC §9.3 bullet 3.
+    Returns None when no reason applies (status=matched clean).
+    """
+
+    status = row.get("status")
+    if status in ("failed", "timeout", "no_match", "skipped"):
+        return status if status in ("failed", "timeout", "no_match") else "not_priced"
+    if status == "needs_review":
+        return "no_match"
+    verify_notes = row.get("verify_notes") or []
+    for note in verify_notes:
+        if isinstance(note, str) and note.startswith("not_priced:"):
+            return "not_priced"
+    if row.get("is_substitute"):
+        return "substitute"
+    if (row.get("shortfall") or 0) > 0:
+        return "shortfall"
+    if row.get("confidence") == "low":
+        return "low_confidence"
+    return None
 
 
 async def handle_price_items(
@@ -899,6 +1047,34 @@ async def handle_flag_conflict(
     side_a = payload.side_a
     side_b = payload.side_b
 
+    # Self-conflict guard: both sides point at the same (page, quote).
+    # The model occasionally submits an item against itself (e.g.
+    # item_4 vs item_4 on `run_9534f056`); that's not a conflict
+    # between two distinct spec statements, it's a single line
+    # that needs a contractor question (DECISIONS F17).
+    same_page = (
+        side_a.source.page is not None and side_a.source.page == side_b.source.page
+    )
+    norm_a = (side_a.source.quote or "").strip()
+    norm_b = (side_b.source.quote or "").strip()
+    same_quote = norm_a != "" and norm_a == norm_b
+    if same_page and same_quote:
+        question_ref_id = f"flag_{secrets.token_hex(4)}"
+        ctx.fired_question_rule_ids.add(question_ref_id)
+        ctx.rejected_claims_buffer.append(
+            {
+                "kind": "flag_conflict_self_conflict",
+                "payload": payload.model_dump(mode="python"),
+                "reason": "both sides cite the same page + quote",
+            }
+        )
+        return {
+            "ok": True,
+            "routed": "contractor_question",
+            "question_ref_id": question_ref_id,
+            "reason": "self_conflict",
+        }
+
     vision_or_unverified = False
     for side in (side_a, side_b):
         src = side.source
@@ -933,22 +1109,59 @@ async def handle_flag_conflict(
             return {"ok": False, "rejected": "unknown_item_id"}
 
     conflict_id = _CONFLICT_PREFIX + secrets.token_hex(4)
+    side_a_dict = {
+        "item_id": side_a.item_id,
+        "source": side_a.source.model_dump(mode="python"),
+    }
+    side_b_dict = {
+        "item_id": side_b.item_id,
+        "source": side_b.source.model_dump(mode="python"),
+    }
     await repo.insert_conflict(
         ctx.db,
         conflict_id=conflict_id,
         run_id=ctx.run_id,
         conflict_type=payload.type.value,
-        side_a={
-            "item_id": side_a.item_id,
-            "source": side_a.source.model_dump(mode="python"),
-        },
-        side_b={
-            "item_id": side_b.item_id,
-            "source": side_b.source.model_dump(mode="python"),
-        },
+        side_a=side_a_dict,
+        side_b=side_b_dict,
         explanation=payload.explanation,
         created_at=_now_iso(),
     )
+    # SSE fan-out: a persisted conflict matches `src/api/events.ts`
+    # ConflictView (id + type + both sides + explanation). Emits
+    # ride the same persist-then-publish path as the DB row —
+    # EventBus.emit runs the write txn internally.
+    await ctx.bus.emit(
+        type="conflict.flagged",
+        run_id=ctx.run_id,
+        agent=AgentName.orchestrator,
+        payload={
+            "conflict": {
+                "id": conflict_id,
+                "type": payload.type.value,
+                "side_a": side_a_dict,
+                "side_b": side_b_dict,
+                "explanation": payload.explanation,
+            }
+        },
+    )
+    # Mirror the conflict onto each referenced item so the Live view
+    # can flip those rows to `in_conflict` without waiting for
+    # `bid.ready`. BidLine assembly derives the same review reason
+    # from the persisted conflict row (SPEC §9.3 bullet 3).
+    for linked_item_id in {side_a.item_id, side_b.item_id}:
+        if linked_item_id is None:
+            continue
+        await ctx.bus.emit(
+            type="item.flagged",
+            run_id=ctx.run_id,
+            agent=AgentName.orchestrator,
+            payload={
+                "item_id": linked_item_id,
+                "reason_code": "in_conflict",
+                "message": conflict_id,
+            },
+        )
     return {"ok": True, "conflict_id": conflict_id}
 
 

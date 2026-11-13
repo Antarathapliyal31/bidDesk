@@ -1,0 +1,73 @@
+{
+  "_comment": "Shared contract fixture for every EditOp variant. Backend's tests/contracts/test_edit_ops_fixture.py parses each entry with the real Pydantic EditRequest; frontend's tests/editOpContract.test.ts asserts the TS discriminator + required fields match. Keep this file in sync with backend/app/contracts/edits.py AND frontend/src/api/bid.ts. See DECISIONS F13.",
+  "ops": [
+    {
+      "name": "set_qty",
+      "ts_type": "SetQtyOp",
+      "body": { "op": "set_qty", "line_id": "line_01", "sale_qty": "38" }
+    },
+    {
+      "name": "set_unit_price",
+      "ts_type": "SetUnitPriceOp",
+      "body": {
+        "op": "set_unit_price",
+        "line_id": "line_01",
+        "unit_price_cents": 1234,
+        "override_reason": "negotiated"
+      }
+    },
+    {
+      "name": "set_sku",
+      "ts_type": "SetSkuOp",
+      "body": { "op": "set_sku", "line_id": "line_01", "sku": "LUM-2X4-8-SPF-2" }
+    },
+    {
+      "name": "set_description",
+      "ts_type": "SetDescriptionOp",
+      "body": {
+        "op": "set_description",
+        "line_id": "line_01",
+        "description": "SPF #2 2x4x8"
+      }
+    },
+    {
+      "name": "accept_line",
+      "ts_type": "AcceptLineOp",
+      "body": { "op": "accept_line", "line_id": "line_01" }
+    },
+    {
+      "name": "delete_line",
+      "ts_type": "DeleteLineOp",
+      "body": { "op": "delete_line", "line_id": "line_01" }
+    },
+    {
+      "name": "add_line",
+      "ts_type": "AddLineOp",
+      "body": {
+        "op": "add_line",
+        "description": "Added by estimator",
+        "sale_qty": "4",
+        "sale_unit": "EA",
+        "unit_price_cents": 2500
+      }
+    },
+    {
+      "name": "apply_proposal",
+      "ts_type": "ApplyProposalOp",
+      "body": {
+        "op": "apply_proposal",
+        "line_id": "line_01",
+        "proposal_id": "rep_abc"
+      }
+    },
+    {
+      "name": "dismiss_proposal",
+      "ts_type": "DismissProposalOp",
+      "body": {
+        "op": "dismiss_proposal",
+        "line_id": "line_01",
+        "proposal_id": "rep_abc"
+      }
+    }
+  ]
+}

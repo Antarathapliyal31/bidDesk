@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { withDelay } from "@/dev-fixtures";
 
 import type { ApiError } from "./ApiError";
+import { apiFetch, isFixtureMode } from "./client";
 import type { FaultKey } from "./useFaults";
 
 /**
@@ -64,15 +65,14 @@ export function useCreateRun() {
   const qc = useQueryClient();
   return useMutation<CreateRunResult, ApiError, CreateRunPayload>({
     mutationFn: async (payload) => {
-      // Exercise the FormData builder so the Phase-5 swap is a
-      // one-line fetch change, not "also now build a FormData".
-      // The result is ignored in fixture mode but kept so a typo in
-      // the builder fails here, not after the swap.
-      toCreateRunFormData(payload);
-      // Fixture mode: every submit lands on the rfp_messy scripted
-      // stream (see dev-fixtures/sse/index.ts). RunPage marks the
-      // run with a "Demo data" chip because the stream is reused.
-      return withDelay({ run_id: "run_demo_messy" }, 800);
+      const body = toCreateRunFormData(payload);
+      if (isFixtureMode()) {
+        // Scripted path — every submit lands on the rfp_messy
+        // stream (see dev-fixtures/sse/index.ts).
+        return withDelay({ run_id: "run_demo_messy" }, 800);
+      }
+      const res = await apiFetch("/api/runs", { method: "POST", body });
+      return (await res.json()) as CreateRunResult;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["runs"] });

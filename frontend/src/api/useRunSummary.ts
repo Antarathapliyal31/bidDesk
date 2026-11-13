@@ -5,6 +5,7 @@ import { FIXTURE_RUNS, type FxRunSummary, withDelay } from "@/dev-fixtures";
 import type { RunViewState } from "@/lib/runReducer";
 
 import type { ApiError } from "./ApiError";
+import { apiFetch, isFixtureMode } from "./client";
 
 /**
  * Run-level metadata that ISN'T in the SSE event stream — project
@@ -44,6 +45,46 @@ export type UseRunSummaryOptions = {
   runState?: RunViewState;
 };
 
+/**
+ * Shape of `GET /api/runs/{id}` per the backend (`runs.py`): nested
+ * `input`, `project`, `branch`; totals live under `bid.totals`.
+ * Only the fields the summary needs are typed here — the full bid
+ * is consumed by `useBidDraft`.
+ */
+type RunDetailResponse = {
+  id: string;
+  status: RunSummary["status"];
+  outcome: RunSummary["outcome"];
+  created_at: string;
+  finalized_at: string | null;
+  input: { kind: RunSummary["input_kind"]; name: string | null; page_count: number | null };
+  project: { name: string | null; due_date_text: string | null };
+  branch: { id: string; name: string; tax_rate_ppm: number };
+  bid: {
+    totals?: { priced_lines?: number; open_flags?: number; total_cents?: number | null };
+  } | null;
+  diff: RunSummary["diff"] | null;
+};
+
+function flattenRunDetail(d: RunDetailResponse): RunSummary {
+  const totals = d.bid?.totals ?? {};
+  return {
+    id: d.id,
+    status: d.status,
+    outcome: d.outcome,
+    input_kind: d.input.kind,
+    input_name: d.input.name ?? "",
+    project_name: d.project.name,
+    branch_name: d.branch.name,
+    priced_lines: totals.priced_lines ?? 0,
+    open_flags: totals.open_flags ?? 0,
+    total_cents: totals.total_cents ?? null,
+    created_at: d.created_at,
+    finalized_at: d.finalized_at,
+    diff: d.diff,
+  };
+}
+
 export function useRunSummary(runId: string, options: UseRunSummaryOptions = {}) {
   const qc = useQueryClient();
   const runState = options.runState;
@@ -71,9 +112,13 @@ export function useRunSummary(runId: string, options: UseRunSummaryOptions = {})
 
   return useQuery<RunSummary | null, ApiError>({
     queryKey: ["run", runId, "summary"],
-    queryFn: () => {
-      const match = FIXTURE_RUNS.find((r) => r.id === runId) ?? null;
-      return withDelay<RunSummary | null>(match, 50);
+    queryFn: async () => {
+      if (isFixtureMode()) {
+        const match = FIXTURE_RUNS.find((r) => r.id === runId) ?? null;
+        return withDelay<RunSummary | null>(match, 50);
+      }
+      const res = await apiFetch(`/api/runs/${runId}`);
+      return flattenRunDetail((await res.json()) as RunDetailResponse);
     },
     // Live run: short staleTime so a navigate-away-and-back
     // picks up a fresh value if the analyst inferred a project

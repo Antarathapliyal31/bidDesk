@@ -57,7 +57,7 @@ const bumpRevisionApplier: BidApplier = (bid, ops) => ({
 
 const noopApplier: BidApplier = (bid) => bid;
 
-const QTY_OP: EditOp = { op: "set_quantity", line_id: "line_01", sale_qty: "40" };
+const QTY_OP: EditOp = { op: "set_qty", line_id: "line_01", sale_qty: "40" };
 const ACCEPT_OP: EditOp = { op: "accept_line", line_id: "line_01" };
 
 describe("bidDraftReducer", () => {
