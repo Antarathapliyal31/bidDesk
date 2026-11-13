@@ -167,25 +167,56 @@ def _response_to_assistant_message(response: Any) -> dict[str, Any]:
     return {"role": "assistant", "content": blocks}
 
 
+def _coerce_requirement_value(
+    field_name: str, value: Any, product_field_types: dict[str, str] | None
+) -> Any:
+    """Coerce a requirement's stored value to the semantic layer's
+    declared type for that field. Handles the common case the
+    YAML author (or JSON round-trip) ends up with (1 / 0) where
+    the field is typed `bool` (DECISIONS F19). Silent on other
+    types — mismatches surface as query errors the model can
+    read.
+    """
+
+    if not product_field_types:
+        return value
+    declared = product_field_types.get(field_name)
+    if declared == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str) and value.lower() in ("true", "false"):
+            return value.lower() == "true"
+    return value
+
+
 def _merge_requirements(
-    item: PricingItemRequest, filters: dict[str, Any]
+    item: PricingItemRequest,
+    filters: dict[str, Any],
+    *,
+    product_field_types: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Inject `item.requirements` into `filters`. Returns
     (merged_filters, notes). Requirements WIN over conflicting
     model-supplied filters — the note tells the model what changed
-    so the next turn can adapt."""
+    so the next turn can adapt. `product_field_types` lets the
+    merger coerce int-against-bool fields (gap rule YAMLs that
+    use `value: 1` for a `bool` field) before the query builder
+    runs."""
 
     merged = dict(filters)
     notes: list[str] = []
     for req in item.requirements:
-        if req.field in merged and merged[req.field] != req.value:
+        value = _coerce_requirement_value(req.field, req.value, product_field_types)
+        if req.field in merged and merged[req.field] != value:
             notes.append(
-                f"requirement {req.field}={req.value!r} overrode "
+                f"requirement {req.field}={value!r} overrode "
                 f"your filter {req.field}={merged[req.field]!r}"
             )
         elif req.field not in merged:
-            notes.append(f"requirement {req.field}={req.value!r} was added to your filters")
-        merged[req.field] = req.value
+            notes.append(f"requirement {req.field}={value!r} was added to your filters")
+        merged[req.field] = value
     return merged, notes
 
 
@@ -234,7 +265,13 @@ def _run_query_catalog(
     if not isinstance(raw_filters, dict):
         return ({"error": "filters must be an object"}, True, [])
 
-    merged_filters, requirement_notes = _merge_requirements(item, raw_filters)
+    prod = bundle.entities.get("products")
+    product_field_types = (
+        {name: fd.type for name, fd in prod.fields.items()} if prod is not None else None
+    )
+    merged_filters, requirement_notes = _merge_requirements(
+        item, raw_filters, product_field_types=product_field_types
+    )
 
     # Build the CatalogQuery (drop item_id, use merged filters).
     try:

@@ -272,7 +272,12 @@ async def _run_completion_pass(
             continue
         tri = triage_by_item.get(iid)
         cat = (tri or {}).get("category")
-        if cat not in (None, "price"):
+        # Retry eligible triage categories:
+        #   - None / "price": never priced or priced but fallible.
+        #   - "ambiguous" (DECISIONS F20): classify_items couldn't
+        #     decide; pint-convertible units like `yards` on trim
+        #     ARE priceable. Assembly keeps the open-review flag.
+        if cat not in (None, "price", "ambiguous"):
             continue
         if iid not in ctx.priced_item_ids:
             # Never priced — classic completion case.

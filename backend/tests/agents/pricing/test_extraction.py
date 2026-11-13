@@ -583,3 +583,105 @@ class TestStepsForBatch:
         )
         assert outcome.submit is None
         assert len(outcome.partial_item_ids) == 8
+
+
+# ---------------------------------------------------------------------------
+# DECISIONS F19: _merge_requirements coerces int → bool on bool fields
+# ---------------------------------------------------------------------------
+
+
+class TestMergeRequirementsBoolCoercion:
+    async def test_mr_drywall_requirement_with_int_1_finds_mr_sku(
+        self, bus, budget, bundle, catalog_db: Path, seeded_run
+    ) -> None:
+        """`wet_area_drywall_mr.requirement.value` used to be int `1`
+        against a bool field; the query returned zero rows and the
+        model landed on no_match. With the YAML flipped to `true`
+        AND the coercion in `_merge_requirements`, either path
+        reaches `DRY-1_2-48X96-MR`. Script the model to send the
+        int form; coercion is what lets the query land."""
+
+        from app.agents.pricing.extraction import run_pricing_loop
+        from app.contracts.pricing_agent import RequirementSpec
+
+        item = PricingItemRequest(
+            item=_item(
+                "it_mr",
+                "1/2 in drywall for upstairs bathrooms",
+                qty="800",
+                unit="sq ft",
+            ),
+            requirements=[RequirementSpec(field="moisture_resistant", value=1)],
+        )
+        responses = [
+            ScriptedResponse(
+                content=[
+                    _tool_use(
+                        "query_catalog",
+                        {
+                            "item_id": "it_mr",
+                            "entity": "products",
+                            "filters": {"category": "drywall", "thickness_in": "1/2"},
+                        },
+                        id_="tu_q",
+                    )
+                ]
+            ),
+            ScriptedResponse(
+                content=[
+                    _tool_use(
+                        "submit_matches",
+                        {
+                            "results": [
+                                {
+                                    "item_id": "it_mr",
+                                    "sku": "DRY-1_2-48X96-MR",
+                                    "searched": "1/2 drywall MR",
+                                }
+                            ]
+                        },
+                        id_="tu_sm",
+                    )
+                ]
+            ),
+        ]
+        outcome = await run_pricing_loop(
+            FakeLLM(responses=responses),
+            input_=PricingLoopInput(
+                run_id=seeded_run,
+                branch_id="BR-NJ-01",
+                items=[item],
+                document_tag="document_test",
+                bundle=bundle,
+                catalog_db_path=catalog_db,
+            ),
+            bus=bus,
+            budget=budget,
+        )
+        # The query_catalog step must have found the MR SKU in the
+        # merged candidate set (coercion worked).
+        assert "DRY-1_2-48X96-MR" in {
+            row.get("sku") for row in outcome.candidate_rows_by_item["it_mr"]
+        }
+        assert outcome.submit is not None
+        assert outcome.submit.results[0].sku == "DRY-1_2-48X96-MR"
+
+
+class TestMergeRequirementsCoerceFunctions:
+    def test_int_one_coerces_to_true_on_bool_field(self) -> None:
+        from app.agents.pricing.extraction import _coerce_requirement_value
+
+        types = {"moisture_resistant": "bool"}
+        assert _coerce_requirement_value("moisture_resistant", 1, types) is True
+        assert _coerce_requirement_value("moisture_resistant", 0, types) is False
+        assert _coerce_requirement_value("moisture_resistant", "true", types) is True
+        assert _coerce_requirement_value("moisture_resistant", "false", types) is False
+        # Already-bool pass-through.
+        assert _coerce_requirement_value("moisture_resistant", True, types) is True
+
+    def test_non_bool_fields_untouched(self) -> None:
+        from app.agents.pricing.extraction import _coerce_requirement_value
+
+        types = {"length_ft": "int", "species": "enum"}
+        assert _coerce_requirement_value("length_ft", 8, types) == 8
+        assert _coerce_requirement_value("species", "SPF", types) == "SPF"

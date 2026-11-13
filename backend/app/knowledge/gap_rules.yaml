@@ -151,7 +151,7 @@ rules:
       not_equals: 1
     requirement:
       field: moisture_resistant
-      value: 1
+      value: true  # DECISIONS F19: field is typed `bool` in products.yaml
     code_ref: null
     basis: "common practice (verify)"
 

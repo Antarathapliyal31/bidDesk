@@ -45,7 +45,11 @@ export type ReviewReasonCode =
   | "shortfall"
   | "substitute"
   | "conflict"
-  | "not_priced";
+  | "not_priced"
+  // DECISIONS F19: classify_items tagged the line ambiguous but
+  // the pricing completion pass placed a match. Flag kept open
+  // so the estimator confirms.
+  | "ambiguous";
 
 export type ReviewState = {
   state: "none" | "open" | "resolved";

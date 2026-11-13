@@ -1380,6 +1380,93 @@ Three possible fixes, all out of scope for this round:
 - Add a code-side pre-triage pass that flips `ambiguous` →
   `price` when `unit_raw` normalizes via pint.
 
+## F19. MR drywall requirement: YAML fix + bool coercion — 2026-11-12
+
+Decision: Two coordinated fixes so a `moisture_resistant`
+requirement reaches `DRY-1_2-48X96-MR`.
+
+- `knowledge/gap_rules.yaml::wet_area_drywall_mr.requirement.value`:
+  `1` → `true`. The field is typed `bool` in
+  `semantic/products.yaml`; the YAML int form worked at a human
+  glance but the semantic layer's query builder matched bool
+  columns against the boolean literal, not `1`.
+- `agents/pricing/extraction.py::_merge_requirements` now takes
+  an optional `product_field_types` map and coerces values for
+  fields typed `bool`: `1/0` → `True/False`, `"true"/"false"` →
+  `True/False`. Belt-and-braces so a future YAML author can't
+  retrip the same bug.
+
+Because: on `run_14716172`'s `item_10` ("1/2 in drywall for
+upstairs bathrooms, 800 sq ft"), code applied the MR requirement
+to `item_requirements`, but the pricing agent's `query_catalog`
+filter — `{category: "drywall", thickness_in: "1/2",
+moisture_resistant: 1}` — returned zero rows against a bool
+column. Verify.py then saw empty candidates + sku=None and
+followed the legitimate-no_match contract, so the user saw "MR
+drywall not found" despite the catalog carrying it.
+
+Tests:
+- `test_extraction.py::TestMergeRequirementsCoerceFunctions` —
+  unit tests for `_coerce_requirement_value` (int 1 / 0 /
+  strings / bool pass-through / non-bool fields untouched).
+- `test_extraction.py::TestMergeRequirementsBoolCoercion` —
+  end-to-end FakeLLM run: `RequirementSpec(field="moisture_resistant",
+  value=1)` on a "1/2 drywall" item, model queries without the
+  MR filter; coercion adds `moisture_resistant: True` and the
+  candidate set now contains `DRY-1_2-48X96-MR` → submit_matches
+  lands.
+
+Trade-off: the coercion is scoped to `bool` fields. Int-vs-int-
+with-enum-values and other type mismatches still fail noisily
+at the semantic layer, which is the right surface for those —
+they usually mean the YAML author chose the wrong value, not
+the wrong type.
+
+## F20. Ambiguous-triaged items get a completion-pass retry + open review — 2026-11-12
+
+Decision: `_run_completion_pass` now treats triage category
+`"ambiguous"` as retry-eligible (alongside `None` and `"price"`).
+Material items that classify_items parked as ambiguous get a
+one-item batch with the full step cap. When pricing succeeds
+the line keeps `review.state = "open"` with reason `"ambiguous"`
+— `_review_reasons_for` now reads the triage row and appends
+`"ambiguous"` whenever the triage category is `"ambiguous"`,
+regardless of how the pricing turned out. Code must not
+silently clear the model's doubt.
+
+Supporting changes:
+- `ReviewReason` in `backend/app/contracts/bid.py` gains
+  `"ambiguous"`.
+- `ReviewReasonCode` in `frontend/src/api/bid.ts` gains
+  `"ambiguous"`.
+- `_line_from` in `agents/.../assemble.py` now threads
+  `triage_by_item[iid]` into `_review_reasons_for`.
+
+Because: on `run_14716172`'s `item_17` ("Fascia (1x6 trim), 12
+yards"), `classify_items` tagged the line `ambiguous` with
+reason "quantity in yards is not a lumber unit; needs LF/pieces
+confirmation". The pre-F20 completion pass skipped it entirely.
+12 yards IS pint-convertible (12 yd → 36 ft → 5 × 8 ft, which
+matches `TRM-1X6-8-SPF-2` per `samples/expected/rfp_messy.json`
+line 17); the pricing agent's existing pint fallback would have
+succeeded if it had been given the item.
+
+Tests: `test_completion_pass.py::TestCompletionPassRetriesAmbiguousItems`
+seeds a fascia item + ambiguous triage, scripts the pricing
+agent to submit `TRM-1X6-8-SPF-2`, and asserts (a) the row
+status turns `matched` with the right SKU, (b) the assembled
+BidLine has `review.state == "open"` with `"ambiguous"` in its
+reasons.
+
+Trade-off: an item the orchestrator CORRECTLY priced via
+completion pass still shows up in the review queue. That's
+intentional — the model's classify step saw enough reason to
+flag it, and the estimator should confirm the inferred
+quantity/length once. If a pattern emerges where ambiguous
+retries never need confirmation (e.g. all pint-convertible
+trim), the fix is in `classify_items` (teach the triage prompt
+to call these `price`), not in silently dropping the flag.
+
 ---
 
 ## Superseded notes
