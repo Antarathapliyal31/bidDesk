@@ -146,15 +146,50 @@ class ExtractionShapeError(Exception):
     still alive."""
 
 
+class ExtractionTruncated(Exception):
+    """Raised when the model's response was cut short by the
+    `max_tokens` cap. The caller falls back to the page-batched
+    extraction path (DECISIONS #20 / F21) instead of retrying the
+    same oversized call. Carries the SDK's `stop_reason` when
+    available so the trace message can be precise.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _looks_truncated(response: Any, tool_input: dict[str, Any] | None) -> str | None:
+    """Return a short diagnostic string when the response shows
+    signs of `max_tokens` truncation; otherwise None. Checks both
+    (a) the SDK's `stop_reason` and (b) a tool_use block with
+    empty / items-less input — the Winnipeg 818-2009 symptom."""
+
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        return "stop_reason=max_tokens"
+    if isinstance(tool_input, dict) and ("items" not in tool_input or tool_input == {}):
+        # Non-empty response went through the tool parser but came
+        # out without items — the SDK returns a partial tool_use
+        # block with empty-dict input when the JSON runs out of
+        # tokens mid-structure.
+        return "report_extraction.input was empty (likely max_tokens)"
+    return None
+
+
 async def extract_items(
     llm: _LLMCallable,
     *,
     input_: ExtractionInput,
     bus: EventBus,
+    max_tokens: int | None = None,
 ) -> ExtractionDraft:
     """Make ONE extraction call. Returns the parsed draft on
     success; raises `ExtractionShapeError` on malformed output so
-    the delegate can re-prompt with feedback.
+    the delegate can re-prompt with feedback. Raises
+    `ExtractionTruncated` when `stop_reason=max_tokens` or the
+    tool_use block came back empty — callers (the agent handler)
+    switch to the page-batched path in that case.
 
     `bus` + `run_id` are threaded so `AnthropicLLM.call()` can
     emit retry.scheduled events through its with_retry layer.
@@ -169,18 +204,40 @@ async def extract_items(
     # system prompt — "Call `report_extraction` exactly once at
     # the end." — to drive the single tool call. `type: "auto"`
     # with ONE tool offered works everywhere.
-    response = await llm.call(
-        prompt,
-        bus=bus,
-        run_id=input_.run_id,
-        tools=[REPORT_EXTRACTION_TOOL],
-        tool_choice={"type": "auto"},
-    )
+    call_kwargs: dict[str, Any] = {
+        "bus": bus,
+        "run_id": input_.run_id,
+        "tools": [REPORT_EXTRACTION_TOOL],
+        "tool_choice": {"type": "auto"},
+    }
+    if max_tokens is not None:
+        call_kwargs["max_tokens"] = max_tokens
+    response = await llm.call(prompt, **call_kwargs)
 
-    tool_input = _extract_tool_input(response)
+    tool_input: dict[str, Any] | None
+    try:
+        tool_input = _extract_tool_input(response)
+    except ExtractionShapeError:
+        # Even the no-tool-use path can be a truncation symptom —
+        # the model started typing JSON in a text block and ran out.
+        truncated = _looks_truncated(response, None)
+        if truncated:
+            raise ExtractionTruncated(truncated) from None
+        raise
+
+    truncated = _looks_truncated(response, tool_input)
+    if truncated:
+        raise ExtractionTruncated(truncated)
+
     try:
         return ExtractionDraft.model_validate(tool_input)
     except ValidationError as exc:
+        # A `max_tokens` cap can also surface as a validation
+        # failure on a well-formed-but-incomplete payload (e.g.
+        # last item truncated). Convert to ExtractionTruncated so
+        # the agent handler picks the batched path.
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise ExtractionTruncated("stop_reason=max_tokens") from exc
         raise ExtractionShapeError(f"report_extraction payload failed validation: {exc}") from exc
 
 

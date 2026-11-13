@@ -19,9 +19,11 @@ from typing import Any, Literal
 from pydantic import Field, ValidationError
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
+from app.agents.analyst.batched_extraction import extract_items_in_batches
 from app.agents.analyst.extraction import (
     ExtractionInput,
     ExtractionShapeError,
+    ExtractionTruncated,
     extract_items,
 )
 from app.agents.analyst.routing import PageExtract, route_pasted_text, route_pdf
@@ -134,8 +136,26 @@ class _AnalystHandler:
                 due_date_text=None,
             ).model_dump(mode="python")
 
-        try:
-            draft = await extract_items(
+        # Long-doc short-circuit (DECISIONS F22): skip the single
+        # call entirely when the page count already exceeds the
+        # safe-for-one-call threshold. The one-call path would
+        # almost certainly hit `max_tokens` + eat a round-trip we
+        # can't afford on the analyst deadline. Jump straight to
+        # the batched pipeline; the trace says why.
+        if len(readable_pages) > settings.single_call_max_pages:
+            await ctx.bus.emit(
+                type="agent.activity",
+                run_id=ctx.run_id,
+                agent=AgentName.document_analyst,
+                payload={
+                    "text": (
+                        f"document is {len(readable_pages)} pages "
+                        f"(> single_call_max_pages={settings.single_call_max_pages}) — "
+                        "running extraction in page batches"
+                    )[:200],
+                },
+            )
+            batched = await extract_items_in_batches(
                 self.llm,
                 input_=ExtractionInput(
                     run_id=ctx.run_id,
@@ -143,14 +163,63 @@ class _AnalystHandler:
                     document_tag=request.document_tag,
                 ),
                 bus=ctx.bus,
+                batch_pages=settings.extraction_batch_pages,
+                overlap_pages=settings.extraction_batch_overlap_pages,
+                concurrency=settings.extraction_batch_concurrency,
+                max_tokens=settings.analyst_max_tokens,
             )
-        except ExtractionShapeError as exc:
-            # Convert to Pydantic ValidationError so delegate's
-            # validation-retry path fires with ValidationFeedback
-            # instead of returning `status="failed"` on the first
-            # malformed call. The feedback carries the reason
-            # (e.g. "no report_extraction tool_use block").
-            raise _shape_error_to_validation_error(exc) from exc
+            draft = batched.draft
+        else:
+            try:
+                draft = await extract_items(
+                    self.llm,
+                    input_=ExtractionInput(
+                        run_id=ctx.run_id,
+                        pages=readable_pages,
+                        document_tag=request.document_tag,
+                    ),
+                    bus=ctx.bus,
+                    max_tokens=settings.analyst_max_tokens,
+                )
+            except ExtractionTruncated as exc:
+                # DECISIONS #20 / F21: single-call hit `max_tokens`
+                # (or the forced tool_use came back empty). Fall
+                # back to page-batched extraction instead of
+                # retrying the same oversized call. Trace message
+                # is deliberately explicit so the Live view
+                # surfaces the reason.
+                await ctx.bus.emit(
+                    type="agent.activity",
+                    run_id=ctx.run_id,
+                    agent=AgentName.document_analyst,
+                    payload={
+                        "text": (
+                            "document too long for one extraction call "
+                            f"({exc.reason}) — retrying in page batches"
+                        )[:200],
+                    },
+                )
+                batched = await extract_items_in_batches(
+                    self.llm,
+                    input_=ExtractionInput(
+                        run_id=ctx.run_id,
+                        pages=readable_pages,
+                        document_tag=request.document_tag,
+                    ),
+                    bus=ctx.bus,
+                    batch_pages=settings.extraction_batch_pages,
+                    overlap_pages=settings.extraction_batch_overlap_pages,
+                    concurrency=settings.extraction_batch_concurrency,
+                    max_tokens=settings.analyst_max_tokens,
+                )
+                draft = batched.draft
+            except ExtractionShapeError as exc:
+                # Convert to Pydantic ValidationError so delegate's
+                # validation-retry path fires with ValidationFeedback
+                # instead of returning `status="failed"` on the first
+                # malformed call. The feedback carries the reason
+                # (e.g. "no report_extraction tool_use block").
+                raise _shape_error_to_validation_error(exc) from exc
 
         items = verify_items(draft.items, pages=pages)
         unreadable.extend(draft.unreadable_pages)
