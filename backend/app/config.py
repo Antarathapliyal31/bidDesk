@@ -53,11 +53,35 @@ class Settings(BaseSettings):
     # compromise between recall on long scanned RFPs and the
     # analyst's overall deadline.
     max_vision_pages: int = Field(default=10, gt=0, alias="MAX_VISION_PAGES")
+    # Extraction output cap (DECISIONS F21). The default was the
+    # SDK's 4096-token floor; a 7-page bid-list densely packed with
+    # items can produce >4k JSON and the tool_use block gets
+    # truncated to empty-input. Sonnet 5.x supports 16k; Haiku 5.x
+    # too. Set via .env to override per model.
+    analyst_max_tokens: int = Field(default=16_000, gt=0, alias="ANALYST_MAX_TOKENS")
+    # Page-batched fallback shape (DECISIONS #20 / F21). Tunable
+    # so real-world docs can dial smaller chunks without a code
+    # change.
+    extraction_batch_pages: int = Field(default=5, gt=0, alias="EXTRACTION_BATCH_PAGES")
+    extraction_batch_overlap_pages: int = Field(
+        default=1, ge=0, alias="EXTRACTION_BATCH_OVERLAP_PAGES"
+    )
+    extraction_batch_concurrency: int = Field(
+        default=3, gt=0, alias="EXTRACTION_BATCH_CONCURRENCY"
+    )
     # Bumped from 90s on 2026-11-12 so 3x Sonnet image calls +
     # extraction fit inside one delegate span (DECISIONS #26).
-    analyst_timeout_s: int = Field(default=150, gt=0, alias="ANALYST_TIMEOUT_S")
+    # Raised again to 300s on 2026-11-13 (DECISIONS F22) to leave
+    # room for the page-batched extraction fallback: vision
+    # transcription (≤90s) + failed single call (≤60s) + batched
+    # retry (5 batches at concurrency 3 on a 20-page doc ≈ 80s)
+    # sums to ~230s worst-case. 300s gives a 70s margin.
+    analyst_timeout_s: int = Field(default=300, gt=0, alias="ANALYST_TIMEOUT_S")
     pricing_batch_timeout_s: int = Field(default=45, gt=0, alias="PRICING_BATCH_TIMEOUT_S")
-    run_timeout_s: int = Field(default=240, gt=0, alias="RUN_TIMEOUT_S")
+    # Raised to 480s on 2026-11-13 so the orchestrator loop +
+    # pricing agent still have room after a worst-case analyst
+    # pass that used the batched fallback (DECISIONS F22).
+    run_timeout_s: int = Field(default=480, gt=0, alias="RUN_TIMEOUT_S")
     max_orchestrator_turns: int = Field(default=12, gt=0, alias="MAX_ORCHESTRATOR_TURNS")
     run_token_budget: int = Field(default=400_000, gt=0, alias="RUN_TOKEN_BUDGET")
 

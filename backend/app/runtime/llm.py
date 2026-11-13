@@ -112,6 +112,11 @@ class ScriptedResponse:
     content: dict[str, Any] | list[Any]
     tokens_in: int = 0
     tokens_out: int = 0
+    # SDK's `stop_reason` surfaced on the response — set
+    # `"max_tokens"` to simulate output-cap truncation in tests
+    # (DECISIONS F21). Anthropic SDK responses expose this
+    # attribute; the extraction layer reads it via `getattr`.
+    stop_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------

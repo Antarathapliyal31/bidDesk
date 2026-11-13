@@ -1523,6 +1523,131 @@ retries never need confirmation (e.g. all pint-convertible
 trim), the fix is in `classify_items` (teach the triage prompt
 to call these `price`), not in silently dropping the flag.
 
+## F21. Extraction max_tokens + page-batched fallback — 2026-11-12
+
+Decision: Raise the analyst extraction call's `max_tokens` via a
+new setting, and if the call still comes back truncated, run the
+page-batched extraction pipeline from DECISIONS #20 instead of
+retrying the same oversized call.
+
+**Settings** (`backend/app/config.py`, all `.env`-overridable):
+- `ANALYST_MAX_TOKENS` default `16_000`. Previous behaviour used
+  `AnthropicLLM.call`'s `max_tokens=4096` default — which a
+  7-page dense bid list blew through mid-tool-use.
+- `EXTRACTION_BATCH_PAGES` default `5`,
+  `EXTRACTION_BATCH_OVERLAP_PAGES` default `1`,
+  `EXTRACTION_BATCH_CONCURRENCY` default `3` — the chunking
+  shape DECISIONS #20 drew up.
+
+**Truncation detection** in `agents/analyst/extraction.py`:
+- New `ExtractionTruncated` exception. Raised when the SDK's
+  `stop_reason == "max_tokens"` OR when the parsed
+  `report_extraction.input` is missing `items` (the Winnipeg
+  818-2009 symptom — SDK returned a tool_use block with
+  `input={}` because JSON generation ran out of tokens
+  mid-structure).
+- `extract_items()` now takes an optional `max_tokens` the
+  handler fills in from settings; raises `ExtractionTruncated`
+  BEFORE the existing `ExtractionShapeError` path when the
+  signal is clear, so the agent handler can fork cleanly.
+
+**Batched fallback** (`agents/analyst/batched_extraction.py`,
+new module):
+- `chunk_pages(pages, size, overlap)` splits the page list with
+  the carry-over.
+- `extract_items_in_batches` runs each chunk through
+  `extract_items` under an `asyncio.Semaphore(concurrency)`,
+  merges items + general_notes by
+  `(source_page, normalized_quote)` — whitespace-collapse +
+  lowercase, same shape the matcher uses elsewhere. Overlap
+  duplicates collapse. `project_name` / `due_date_text` take
+  the first non-null across batches. A truncated / shape-
+  errored batch doesn't abort the merge; its page range lands
+  in `unreadable_pages` and the `agent.activity` event says
+  which pages failed.
+
+**Agent handler** (`agents/analyst/agent.py`):
+- Catches `ExtractionTruncated` from the single-call path.
+  Emits an `agent.activity` event with the trace message
+  `"document too long for one extraction call ({reason}) —
+  retrying in page batches"` before invoking the batched path,
+  so the Live view surfaces the reason.
+- Threads `settings.analyst_max_tokens` into both paths.
+
+**FakeLLM support**: `ScriptedResponse` gained an optional
+`stop_reason` field so tests can simulate the max_tokens cap
+end-to-end. `FakeLLM.call` already accepts and ignores
+`max_tokens`.
+
+Tests: `tests/agents/analyst/test_batched_extraction.py` covers
+(a) `chunk_pages` boundary math (overlap, tail, no-overlap);
+(b) `ExtractionTruncated` fires on both `stop_reason=max_tokens`
+and empty-tool-input-without-stop-reason;
+(c) a two-batch run with an overlap page dedupes the duplicate
+item deterministically; (d) a failing batch marks its page
+range `unreadable` without killing the merge.
+
+Trade-off: the fallback pays the extraction cost twice on a
+truncated run (one failed single-call + N batches). Still far
+cheaper than the previous behaviour, which was "retry the same
+oversized call once, give up, surface server_error to the UI."
+If this fires often for a specific doc, lower
+`EXTRACTION_BATCH_PAGES` via `.env` rather than editing code.
+
+## F22. Analyst deadlines + long-doc short-circuit — 2026-11-13
+
+Decision: Two refinements on top of F21.
+
+**Deadline headroom.** The batched extraction fallback adds an
+observable stack of phases to one analyst delegate call:
+vision transcription (capped at 10 pages, ≈60–90s worst case) +
+the failed single call (≈30–60s if we take that path) + batched
+retries (20-page doc = 5 batches at concurrency 3 ≈ 80s). The
+previous `analyst_timeout_s=150` left no room; raised to
+**300s** with a 70s margin over the worst-case 230s sum.
+`run_timeout_s` raised from **240 → 480s** so the orchestrator
+loop + pricing agent still have room after a worst-case analyst
+pass. Both remain `.env`-overridable.
+
+**Long-doc short-circuit.** `single_call_max_pages` (default
+30) was defined in config but never consulted. The handler now
+checks `len(readable_pages) > settings.single_call_max_pages`
+BEFORE the single-call path and, if so, jumps straight to
+`extract_items_in_batches` with an `agent.activity` event:
+`"document is N pages (> single_call_max_pages=30) — running
+extraction in page batches"`. This saves one guaranteed-wasted
+single call on any genuinely long document; the F21 fallback
+still catches shorter-but-dense RFPs (Winnipeg 7-pager).
+
+**Vision pages through the batched path** — confirmed, no code
+change needed. `_text_pages_block` renders
+`[[page N (image)]]` for routes `"vision"` / `"text+vision"`
+inside each chunk; after merge, the handler calls
+`verify_items(draft.items, pages=pages)` with the FULL original
+pages list (not `readable_pages`), so `verify.py` still reads
+each item's source_page's ORIGINAL route and stamps
+`read_via='vision'` with `verified=False` on vision-sourced
+items.
+
+Tests: `tests/agents/analyst/test_batched_extraction.py` gained
+- `TestLongDocShortCircuit::test_over_single_call_max_pages_skips_single_call` —
+  31-page doc; FakeLLM is scripted with ONLY batch responses
+  (8 batches at stride 4). If the handler had attempted a
+  single call first, FakeLLM would exhaust and the test would
+  fail. All 8 batches consumed → path confirmed.
+- `TestVisionPagesBatched::test_batched_extraction_keeps_read_via_vision` —
+  mixed 6-page doc (pages 1–4 text, 5–6 vision-transcribed).
+  Forces the batched path by lowering `single_call_max_pages=4`.
+  Final items have `read_via='text'` on page 2's item and
+  `read_via='vision' + verified=False` on page 5 and 6's items.
+  The page-5 overlap duplicate collapses.
+
+Trade-off: longer deadlines mean a stuck call lingers for up to
+5 minutes before the delegate wrapper kills it. The budget
+system still enforces token/turn ceilings, so a stuck call
+isn't a resource bomb — it's a UX bomb. If this starts biting,
+lower `ANALYST_TIMEOUT_S` via `.env` on specific environments.
+
 ---
 
 ## Superseded notes
