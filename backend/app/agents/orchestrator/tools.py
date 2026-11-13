@@ -364,11 +364,18 @@ async def apply_rule_questions(ctx: OrchestratorContext) -> list[dict[str, Any]]
     seen_bid_rule_ids: set[str] = set()
 
     # Build the merged view per item for bid-scope matching.
+    # Product-category gap rules (`insulation_r_value_missing`,
+    # `drywall_thickness_missing`, etc.) are MATERIAL-only — an
+    # exclusion line like "Insulation by others" infers
+    # category=insulation from its wording and would falsely fire
+    # the rule otherwise (DECISIONS F16).
     merged_views: list[dict[str, Any]] = []
     for iid, item in ctx.items_by_id.items():
         view = _item_dict_for_matcher(item, triage_by_item.get(iid))
         view = _merge_requirements_into_item_view(view, reqs_by_item.get(iid, []))
         merged_views.append(view)
+        if item.get("kind") != "material":
+            continue
         # Item-scope QUESTION rules fire per item.
         context_text = item.get("source_quote") or ""
         for rule in ctx.gap_rules:
@@ -455,6 +462,9 @@ async def handle_check_gap_rules(
     item_rules_payload: list[dict[str, Any]] = []
     for iid in target_ids:
         if iid not in ctx.items_by_id:
+            continue
+        # Product-category item rules are MATERIAL-only — see F16.
+        if ctx.items_by_id[iid].get("kind") != "material":
             continue
         reqs, questions = _apply_item_rules(ctx, ctx.items_by_id[iid], triage_by_item.get(iid))
         if not (reqs or questions):
@@ -657,6 +667,9 @@ async def apply_rule_requirements(ctx: OrchestratorContext) -> dict[str, Any]:
 
     entries: list[AddRequirementEntry] = []
     for iid, item in ctx.items_by_id.items():
+        # Product-category item rules are MATERIAL-only (F16).
+        if item.get("kind") != "material":
+            continue
         reqs, _questions = _apply_item_rules(ctx, item, triage_by_item.get(iid))
         for rule in reqs:
             ctx.fired_requirement_rule_ids.add(rule.id)
@@ -693,7 +706,11 @@ async def apply_rule_requirements(ctx: OrchestratorContext) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-_PRICING_BATCH_SIZE = 8
+# Smaller batches = more parallel calls, fewer items per step cap.
+# 8 items in one batch regularly hit the pricing loop's `max_steps`
+# once the model does one query_catalog per item (DECISIONS F15).
+# 4 items × `steps_for_batch(4)=10` steps = comfortable headroom.
+_PRICING_BATCH_SIZE = 4
 _PRICING_CONCURRENCY = 2
 
 
@@ -1029,6 +1046,34 @@ async def handle_flag_conflict(
 
     side_a = payload.side_a
     side_b = payload.side_b
+
+    # Self-conflict guard: both sides point at the same (page, quote).
+    # The model occasionally submits an item against itself (e.g.
+    # item_4 vs item_4 on `run_9534f056`); that's not a conflict
+    # between two distinct spec statements, it's a single line
+    # that needs a contractor question (DECISIONS F17).
+    same_page = (
+        side_a.source.page is not None and side_a.source.page == side_b.source.page
+    )
+    norm_a = (side_a.source.quote or "").strip()
+    norm_b = (side_b.source.quote or "").strip()
+    same_quote = norm_a != "" and norm_a == norm_b
+    if same_page and same_quote:
+        question_ref_id = f"flag_{secrets.token_hex(4)}"
+        ctx.fired_question_rule_ids.add(question_ref_id)
+        ctx.rejected_claims_buffer.append(
+            {
+                "kind": "flag_conflict_self_conflict",
+                "payload": payload.model_dump(mode="python"),
+                "reason": "both sides cite the same page + quote",
+            }
+        )
+        return {
+            "ok": True,
+            "routed": "contractor_question",
+            "question_ref_id": question_ref_id,
+            "reason": "self_conflict",
+        }
 
     vision_or_unverified = False
     for side in (side_a, side_b):

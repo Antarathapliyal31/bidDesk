@@ -1241,6 +1241,145 @@ needs an estimator click per line for a case the code CAN
 resolve safely. (c) add `UNKNOWN_UNIT` to ReviewReason — same
 downside, more schema changes.
 
+## F15. Pricing step cap scales with batch size — 2026-11-12
+
+Decision: The pricing loop's `max_steps` now scales with the
+batch size via `steps_for_batch(n) = max(6, 2*n + 2)`. The
+orchestrator's `_PRICING_BATCH_SIZE` drops from **8 → 4** so one
+batch can't take 8 query_catalog turns in the first place.
+`_run_completion_pass` now treats items whose first-pass
+`price_results` row carries `max_steps_exceeded` / `agent_error`
+/ `not_priced:*` as retry-eligible, and prices them **one item
+per batch** so each gets the full step cap to itself.
+
+Because: `run_9534f056` had 8 items fail with
+`max_steps_exceeded` on the second `price_items`. One
+`delegate.pricing_agent` batch ran 20 s and spun 6 query_catalog
+turns without reaching `submit_matches`; the cap tripped. The
+old `pricing_completion_pass` only looked at items with NO price
+row, so the max_steps items (which DO get a failed row written)
+were invisible to it. Smaller batches × per-item retries recover
+the flaky case.
+
+Tests: `tests/agents/pricing/test_extraction.py` gained
+`TestStepsForBatch` — unit test for the scaling formula, plus
+two 8-item FakeLLM scripts that (a) complete under the new cap
+and (b) still fail under the old `max_steps=6` to pin the
+regression. `tests/agents/orchestrator/test_completion_pass.py`
+is new and asserts a `max_steps_exceeded` row is picked up for
+retry and the second pass turns it into a `matched` row.
+
+Trade-off: 4-item batches mean roughly 2× the LLM calls per run.
+The concurrency cap (semaphore 2) keeps wall-clock steady. On an
+rfp_messy run (~24 priceable items) that's 6 batches at 2 at a
+time ≈ 3 round-trips, vs 3 batches ≈ 1.5 round-trips before. The
+10-step floor per 4-item batch covers one query per item + one
+retry per item + submit with comfortable headroom.
+
+## F16. Product gap rules are MATERIAL-only — 2026-11-12
+
+Decision: Rule-evaluation sites in `agents/orchestrator/tools.py`
+(`apply_rule_questions`, `apply_rule_requirements`,
+`handle_check_gap_rules`) now skip items whose `kind != "material"`
+before running the gap-rule matcher. Exclusions / labor / notes /
+unreadable lines share `_infer_specs` with materials for their
+display metadata, but they must not trigger product-shape rules.
+
+Because: on `run_9534f056` the exclusion "Insulation by others"
+(kind=exclusion) had its category inferred as `insulation` by
+the keyword matcher and `r_value=None`, which matched
+`insulation_r_value_missing.missing_condition.is_null`. The rule
+went into `fired_question_rule_ids`, the model's question
+validated, and the contractor got asked "which R-value for this
+insulation we're not supplying" — nonsense. The actual
+insulation lines ("R-19 insulation", "R-30 insulation for
+attic", "R-13 insulation for 2x4 walls") correctly had r_value
+inferred and did NOT trip the rule — the inference was fine;
+scope was wrong.
+
+Tests: `test_tools.py` → `TestRValueInferenceAndMaterialOnly`.
+Three cases: regex covers R-13 / R-19 / R-30 / "R19" / "R 30";
+the rule does not fire for a material insulation item with
+R-value in text; the rule does not fire for an exclusion item
+with no R-value.
+
+Trade-off: a `kind=note` line that happens to describe a real
+insulation gap won't trigger a rule-authored question anymore.
+That's intentional — if the line wasn't extracted as
+`kind=material`, the analyst already decided it's not a
+pricable item; the question path can still come from the
+model's own `add_requirements` + submit_bid flow.
+
+## F17. flag_conflict rejects self-conflict (same page + quote) — 2026-11-12
+
+Decision: `handle_flag_conflict` now returns
+`{"ok": true, "routed": "contractor_question", "reason":
+"self_conflict"}` when both sides cite the same `page` AND the
+same stripped `quote`, AND registers a synthetic question_ref_id
+in `fired_question_rule_ids` so the model can basis a
+contractor_question against it. No conflict row is written.
+
+Because: on `run_9534f056` the model submitted `flag_conflict`
+with item_4 on both sides (same page, same quote) — "a line
+against itself". That isn't a genuine spec contradiction between
+two statements; it's "I'm unsure about this one line" and
+belongs in contractor_questions. The old handler accepted it,
+wrote a conflict row, and both sides ended up flagged
+`in_conflict` for the same reason.
+
+Tests: `test_tools.py` → `TestFlagConflictSelfConflict`. One
+case for same page + same quote (routes to question, no row),
+one for same page + distinct quotes (persists as a real
+conflict — the common "spec says A on line 1, schedule says B on
+line 7" case must keep working).
+
+Trade-off: the model occasionally wants to flag "I see two
+copies of the same spec on the same page" — that's a genuine
+duplicate, not a self-conflict. Under this guard that collapses
+to a question. Acceptable: the model can still submit it with
+different item_ids on the two sides if it truly means two
+distinct line items.
+
+## F18. Report-only: run_14716172 MR drywall + fascia misses — 2026-11-12
+
+Reported (no code fix this round). Both items came back without
+a priced SKU after the orchestrator finished:
+
+**item_10 "1/2 in drywall for upstairs bathrooms" — status
+no_match despite catalog containing `DRY-1_2-48X96-MR`.**
+Root cause: `knowledge/gap_rules.yaml` → `wet_area_drywall_mr.requirement`
+carries `value: 1` (int) for a `moisture_resistant` field that
+`semantic/products.yaml` declares as `type: bool`. Code merges
+the requirement into the pricing query filter via
+`extraction._merge_requirements` as-is → the semantic layer
+rejects the int-against-bool match, candidates come back empty,
+`verify.py` treats empty-candidates + sku=None as a legitimate
+no_match (per the `TestNoMatch` contract in `test_verify.py`).
+
+Two possible fixes, both out of scope for this round:
+- YAML: change `value: 1` → `value: true` in `wet_area_drywall_mr`.
+- Code: coerce bool-typed fields in `_merge_requirements`
+  (`int(1)` → `True`, `int(0)` → `False`). Belt-and-braces.
+
+**item_17 "Fascia (1x6 trim), 12 yards" — never priced.**
+Root cause: the orchestrator's `classify_items` call put item_17
+in `category: ambiguous` with reason "Fascia 1x6 trim quantity
+in yards is not a lumber unit; needs LF/pieces confirmation".
+`_run_completion_pass` only retries `None` / `"price"` triage
+categories — `ambiguous` items are skipped. In fact 12 yards is
+pint-convertible (12 yd → 36 ft → 5 × 8 ft trim pieces,
+matching `TRM-1X6-8-SPF-2` per `samples/expected/rfp_messy.json`
+line 17).
+
+Three possible fixes, all out of scope for this round:
+- Teach the classify_items prompt that pint-convertible linear
+  units (yards, meters) on trim/lumber are `price`-able.
+- `_run_completion_pass` re-tries `ambiguous`-triaged material
+  items with a single-item batch (same pattern as F15's
+  max_steps retry).
+- Add a code-side pre-triage pass that flips `ambiguous` →
+  `price` when `unit_raw` normalizes via pint.
+
 ---
 
 ## Superseded notes

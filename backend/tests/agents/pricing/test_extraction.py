@@ -436,3 +436,150 @@ class TestShapeErrors:
                 bus=bus,
                 budget=budget,
             )
+
+
+# ---------------------------------------------------------------------------
+# DECISIONS F15: step cap scales with batch size
+# ---------------------------------------------------------------------------
+
+
+class TestStepsForBatch:
+    def test_scales_linearly_with_floor(self) -> None:
+        from app.agents.pricing.agent import steps_for_batch
+
+        # Floor at 6 for small batches.
+        assert steps_for_batch(1) == 6
+        assert steps_for_batch(2) == 6
+        # 2*N+2 from N=3 onward.
+        assert steps_for_batch(3) == 8
+        assert steps_for_batch(4) == 10
+        assert steps_for_batch(8) == 18
+
+    async def test_eight_item_batch_that_used_to_hit_cap_now_submits(
+        self, bus, budget, bundle, catalog_db: Path, seeded_run
+    ) -> None:
+        """Scripted 8-item batch: each step issues ONE query_catalog
+        for a different item (the pathological case the real model
+        occasionally falls into). Old floor-6 cap would stop at
+        step 7 with `partial_item_ids` populated; the new cap
+        (steps_for_batch(8)=18) lets the submit land."""
+
+        from app.agents.pricing.agent import steps_for_batch
+
+        items = [
+            PricingItemRequest(
+                item=_item(f"it_{i}", f"2x4 x 8 SPF item {i}", qty="1", unit="ea"),
+                requirements=[],
+            )
+            for i in range(8)
+        ]
+
+        responses: list[ScriptedResponse] = []
+        for i in range(8):
+            responses.append(
+                ScriptedResponse(
+                    content=[
+                        _tool_use(
+                            "query_catalog",
+                            {
+                                "item_id": f"it_{i}",
+                                "entity": "products",
+                                "filters": {
+                                    "nominal_size": "2x4",
+                                    "length_ft": 8,
+                                    "species": "SPF",
+                                },
+                            },
+                            id_=f"tu_q{i}",
+                        )
+                    ]
+                )
+            )
+        responses.append(
+            ScriptedResponse(
+                content=[
+                    _tool_use(
+                        "submit_matches",
+                        {
+                            "results": [
+                                {
+                                    "item_id": f"it_{i}",
+                                    "sku": "LUM-2X4-8-SPF-2",
+                                    "searched": "SPF 2x4x8",
+                                }
+                                for i in range(8)
+                            ]
+                        },
+                        id_="tu_submit",
+                    )
+                ]
+            )
+        )
+        fake = FakeLLM(responses=responses)
+
+        outcome = await run_pricing_loop(
+            fake,
+            input_=PricingLoopInput(
+                run_id=seeded_run,
+                branch_id="BR-NJ-01",
+                items=items,
+                document_tag="document_test",
+                bundle=bundle,
+                catalog_db_path=catalog_db,
+                max_steps=steps_for_batch(len(items)),
+            ),
+            bus=bus,
+            budget=budget,
+        )
+        assert outcome.submit is not None
+        assert outcome.partial_item_ids == []
+        # 9 model steps: 8 query turns + 1 submit.
+        assert outcome.steps == 9
+
+    async def test_eight_item_batch_with_old_cap_still_partials(
+        self, bus, budget, bundle, catalog_db: Path, seeded_run
+    ) -> None:
+        """Same scripted sequence but with the pre-F15 cap (6)
+        — proves the regression we're guarding against."""
+
+        items = [
+            PricingItemRequest(
+                item=_item(f"it_{i}", f"2x4 x 8 SPF item {i}", qty="1", unit="ea"),
+                requirements=[],
+            )
+            for i in range(8)
+        ]
+        responses = [
+            ScriptedResponse(
+                content=[
+                    _tool_use(
+                        "query_catalog",
+                        {
+                            "item_id": f"it_{i}",
+                            "entity": "products",
+                            "filters": {"species": "SPF"},
+                        },
+                        id_=f"tu_q{i}",
+                    )
+                ]
+            )
+            for i in range(8)
+        ]
+        fake = FakeLLM(responses=responses)
+
+        outcome = await run_pricing_loop(
+            fake,
+            input_=PricingLoopInput(
+                run_id=seeded_run,
+                branch_id="BR-NJ-01",
+                items=items,
+                document_tag="document_test",
+                bundle=bundle,
+                catalog_db_path=catalog_db,
+                max_steps=6,  # pre-F15 default
+            ),
+            bus=bus,
+            budget=budget,
+        )
+        assert outcome.submit is None
+        assert len(outcome.partial_item_ids) == 8
