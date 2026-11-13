@@ -152,22 +152,14 @@ until the backend adds response models — see DECISIONS F11.
 
 ## Failure-injection demo
 
-`SPEC §10.6`. Toggle on in the New-bid page under "Demo failure injection":
-
-- **pricing_timeout_once** — the first pricing batch exceeds its 45s
-  timeout; the orchestrator retries once and the batch succeeds the
-  second time. You'll see the amber retry row in the trace timeline.
-- **analyst_malformed_once** — the analyst's first `extract_items`
-  call returns JSON that fails the Pydantic validator; the runtime
-  surfaces the per-field errors, retries, the second call succeeds.
-- **budget_exhaustion** — the orchestrator exhausts its step budget
-  before `submit_bid`; the fallback assembler takes over and the
-  bid comes back `kind="draft", generated_by="fallback"`, with
-  `partial_reasons` populated.
-
-These are shipping gates: the demo UI shows every error state
-(retry note, validation detail, partial banner) because the
-shipping code does.
+**Planned, not yet built** (SPEC §10.6). The design calls for a
+`.env`-gated "Demo failure injection" toggle on the New-bid page
+that lets you simulate `pricing_timeout_once`,
+`analyst_malformed_once`, and `budget_exhaustion` to exercise
+the retry / validation / fallback paths end-to-end. The toggle
+UI and the fault keys are stubbed; the registry that would
+actually inject the faults into the runtime isn't wired yet.
+Next milestone on this track.
 
 ---
 
