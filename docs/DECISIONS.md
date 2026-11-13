@@ -1116,6 +1116,131 @@ For the first four, only `runtime/trace.py` (span-level) and
 not the orchestrator — so leaving them is correct for this
 scope.
 
+## F13. EditOp discriminator mismatch, 422 envelope, retry policy — 2026-11-12
+
+Decision: Three coordinated fixes after a manual e2e on
+`run_14716172` found PATCH loops and empty-cell lumber lines.
+
+**Op discriminator drift (the real bug behind the UI 422 loop).**
+The frontend sent `op: "set_quantity"` + `op: "apply_reprice"`;
+the backend's `EditRequest` (and `docs/API_CONTRACT.md`) pin them
+as `set_qty` / `apply_proposal` / `dismiss_proposal` — every save
+rejected at 422, and the autosave debounce re-fired every 800 ms
+because `saveTransportError` kept the rejected ops in
+`pendingOps`. Two other quieter mismatches surfaced at the same
+time: `SetUnitPriceOp.reason` (backend wants `override_reason`)
+and `SetDescriptionOp.text` (backend wants `description`).
+
+Fixes landed:
+- Rewrote `src/api/bid.ts` to mirror backend discriminators and
+  field names exactly (`SetQtyOp`, `ApplyProposalOp`, new
+  `DismissProposalOp`; `override_reason`, `description`). Updated
+  every call site (`BidWorkspace`, `dev-fixtures/bid`, tests).
+- Shared JSON fixture at `docs/edit_op_fixtures.json` — one
+  canonical body per op. `backend/tests/contracts/test_edit_ops_fixture.py`
+  parses each entry with the real `EditRequest`;
+  `frontend/tests/editOpContract.test.ts` loads the same file and
+  compile-time-assigns each body to `EditOp`. Any rename on
+  either side fails both suites at CI.
+
+**SPEC §13 envelope for `RequestValidationError`.** Before: the
+backend only wrapped `ApiError` subclasses; FastAPI's own
+`RequestValidationError` leaked through as the raw `detail` array,
+so `apiErrorFromResponse` on the frontend saw an unknown shape
+and collapsed to `server_error`. New handler in
+`backend/app/api/errors.py` renders the SPEC envelope
+`{error: {code: "invalid_input", message, details.ops}}` where
+`details.ops` is a `[{index, error}, …]` grouping — op-scoped
+errors get their array index, non-op errors (e.g. missing
+`draft_revision`) land under `index: null`. Covered by three new
+tests in `tests/api/test_error_handlers.py`.
+
+**Retry policy (no more 422 loop).** `useBidDraft.runSave` now
+branches on the error:
+- 409 `stale_revision`: reseed the reducer from `details.current`,
+  reset attempt counter. (Already shipped, kept.)
+- 4xx otherwise: `dispatch({type: "saveInvalid", perOpErrors})`.
+  The reducer now drops `inFlightOps` on `saveInvalid` so the
+  autosave debounce can't re-fire the same malformed body. The
+  envelope's `details.ops` flows straight into
+  `error.perOpErrors`; a missing breakdown degrades to one
+  "server rejected the edit" entry per queued op.
+- 5xx / network: `saveTransportError` (reducer puts ops back
+  into `pendingOps`), guarded by exponential backoff capped at
+  3 attempts / 4 s. After the last attempt, we surface a
+  terminal invalid-shape error so the UI has something to show.
+
+Alternatives considered: (a) make the backend accept both
+`set_quantity` and `set_qty` — rejected: permissive endpoints
+swallow drift silently and the SPEC/API_CONTRACT is already
+pinned. (b) retry the 4xx anyway with an attempt cap — rejected:
+if the body is wrong-shaped, retrying buys nothing but noise
+and flashes the error banner three extra times at the user.
+(c) switch frontend to generated `EditRequest` type from
+`schema.gen.ts` — the TypeAdapter forward-ref issue on the
+discriminated union (same one that broke `EditRequest = Body(...)`
+in a test) means the generator inlines it as `unknown`; revisit
+when that upstream lands.
+
+Trade-off: the backend's new 4xx envelope changes what the UI
+sees on every validation failure (used to be FastAPI's raw
+`detail`). Only call sites that read `err.details.detail` would
+break — none exist; `apiErrorFromResponse` + `messageForError`
+already treat details as a loose record.
+
+## F14. Pricing converter: unit-less EA fallback — 2026-11-12
+
+Decision: When the analyst leaves `unit_raw=None` on a line that
+the pricing agent matched to an EA-sold SKU AND the extracted
+`quantity_text` parses as a positive whole integer, the converter
+in `backend/app/catalog/units.py` treats the number as a piece
+count instead of bailing to `unit_conversion_unavailable`. It
+records a `MatchAssumption(field="sale_unit", value="EA", …)`,
+caps confidence at medium with a new `confidence.unit_assumed_ea_from_countless_qty`
+signal, and emits `verify_notes = ["assumed_ea_from_countless_qty"]`.
+The note is intentionally NOT in SPEC §9.3 bullet 3's open-flag
+set — the estimator sees the assumption via the medium-confidence
+chip + assumption list, but the line isn't blocked from finalize.
+
+Scope: the fallback fires only when all three hold — `unit_raw is
+None`, `sale_unit == "EA"`, and `item_qty == item_qty.to_integral_value()`.
+Decimal qty (e.g. `12.5`) and non-EA sale units (`SHT`, `BAG`,
+`ROLL`) stay on the old failure path; those really need a unit
+to make sense.
+
+Because: the analyst dropped the unit on `(100) 2x4 x 8' SPF #2`
+style quotes (verified on `run_14716172` — items 1/2/3 had
+`quantity_text="100"/"40"/"20"` and `unit_raw=NULL`). On these
+lines the extracted number IS the piece count — the orchestrator
+shouldn't be the place that pretends we don't know that. The
+analyst module is off-limits this round (another session owns
+it), so the fix lives in pricing's converter. If the analyst
+starts tagging "pcs" correctly, the fallback never fires: the
+earlier identity-passthrough branch takes over (`item_unit` is
+set, equal to `"EA"`).
+
+Verified against `samples/expected/rfp_messy.json` lines 1–3
+(`quantity_text="100"/"40"/"20"`, expected SKUs
+`LUM-2X4-8-SPF-2 / LUM-2X6-16-SYP-2-PTAG / LUM-2X10-18-SPF-2`) —
+with the fallback applied, `sale_qty` matches the expected count
+on each. Previously those three cells rendered "—" in the UI.
+
+Tests added to `tests/catalog/test_units.py`:
+`TestAssumedEaFromCountlessQty` — whole-int + EA falls back (new
+behaviour), decimal still fails, non-EA sale units still fail,
+`unit_raw` set-but-unrecognisable (e.g. `"meters"`) still fails
+(so a stray un-normalisable unit can't accidentally pretend to
+be a piece count).
+
+Alternatives considered: (a) fix the analyst — correct but
+blocked by the ownership split; will revisit once that session
+lands and remove the fallback if the analyst becomes reliable.
+(b) emit `item.flagged(reason_code="unknown_unit")` and leave
+`sale_qty=None` — honest but makes items 1/2/3 unfinalizable and
+needs an estimator click per line for a case the code CAN
+resolve safely. (c) add `UNKNOWN_UNIT` to ReviewReason — same
+downside, more schema changes.
+
 ---
 
 ## Superseded notes

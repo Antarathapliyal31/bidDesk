@@ -43,6 +43,14 @@ import { apiFetch, isFixtureMode } from "./client";
 const AUTOSAVE_MS = 800;
 const PATCH_LATENCY_MS = 400;
 
+// Retry policy for transport failures (network drop + 5xx). 4xx
+// errors other than 409 never retry — the request is malformed and
+// will keep 422-looping forever (see DECISIONS F13 for the real
+// bug this guards against).
+const RETRY_BASE_MS = 400;
+const RETRY_MAX_MS = 4_000;
+const RETRY_MAX_ATTEMPTS = 3;
+
 /**
  * Module-level reprice store so the fixture PATCH can resolve
  * ApplyReprice ops against the proposal that `requestReprice`
@@ -74,6 +82,10 @@ export function useBidDraft(runId: string): UseBidDraftResult {
   const qc = useQueryClient();
   const [state, dispatch] = useReducer(bidDraftReducer, initialBidDraftState);
   const stateRef = useRef<BidDraftState>(state);
+  // Transport-retry bookkeeping. One attempt counter per hook
+  // instance — a 5xx or network drop backs off exponentially and
+  // gives up after RETRY_MAX_ATTEMPTS; a successful save resets it.
+  const retryAttemptRef = useRef(0);
   // Mirror state into the ref in an effect (not during render) so
   // scheduled callbacks (autosave, finalize) see the latest ops.
   useEffect(() => {
@@ -146,6 +158,7 @@ export function useBidDraft(runId: string): UseBidDraftResult {
         serverBid = payload.bid;
       }
       dispatch({ type: "saveSucceeded", bid: serverBid, applier });
+      retryAttemptRef.current = 0;
       qc.setQueryData<FixtureBidEnvelope>(["bid", runId], (prev) =>
         prev ? { ...prev, bid: serverBid } : { bid: serverBid, agent_bid: serverBid },
       );
@@ -165,13 +178,69 @@ export function useBidDraft(runId: string): UseBidDraftResult {
             bid: current,
             agentBid: prev?.agent_bid ?? current,
           });
+          retryAttemptRef.current = 0;
           return;
         }
       }
+      // 4xx other than 409 → the request is malformed; retrying
+      // it won't help. Surface it as `saveInvalid` so the UI can
+      // show the per-op error and the autosave debounce stops
+      // firing on these ops (they move out of `pendingOps`).
+      if (
+        isApiError(err) &&
+        err.status >= 400 &&
+        err.status < 500 &&
+        err.code !== "stale_revision"
+      ) {
+        const perOpErrors = extractPerOpErrors(err, opsToSave.length);
+        dispatch({ type: "saveInvalid", perOpErrors });
+        retryAttemptRef.current = 0;
+        return;
+      }
+      // Network drop (code === "network_error") or 5xx → honour
+      // the retry policy. Reducer's `saveTransportError` puts the
+      // ops back in `pendingOps`; here we add a backoff on top of
+      // the autosave debounce so we don't hammer the server.
+      const attempt = retryAttemptRef.current + 1;
+      if (attempt > RETRY_MAX_ATTEMPTS) {
+        retryAttemptRef.current = 0;
+        const message =
+          err instanceof Error ? err.message : "Save failed after multiple retries.";
+        dispatch({ type: "saveInvalid", perOpErrors: [{ index: -1, message }] });
+        return;
+      }
+      retryAttemptRef.current = attempt;
+      const delay = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
+      await new Promise((resolve) => setTimeout(resolve, delay));
       const message = err instanceof Error ? err.message : "Save failed";
       dispatch({ type: "saveTransportError", message });
     }
   }, [applier, qc, runId]);
+
+  // Pull per-op errors out of an `invalid_input` envelope (new
+  // RequestValidationError handler in app.api.errors — DECISIONS
+  // F13). Falls back to a single "all ops rejected" entry when
+  // the envelope doesn't carry the breakdown.
+  function extractPerOpErrors(
+    err: unknown,
+    opCount: number,
+  ): Array<{ index: number; message: string }> {
+    if (!isApiError(err)) return [{ index: -1, message: "Save failed" }];
+    const details = err.details as
+      | { ops?: Array<{ index: number | null; error: string }> }
+      | undefined;
+    if (details?.ops && details.ops.length > 0) {
+      return details.ops.map((entry) => ({
+        index: entry.index ?? -1,
+        message: entry.error,
+      }));
+    }
+    const fallback = err.message || "The server rejected the edit.";
+    return Array.from({ length: Math.max(opCount, 1) }, (_, i) => ({
+      index: i,
+      message: fallback,
+    }));
+  }
 
   // Autosave debounce. Any pendingOps → schedule a save.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

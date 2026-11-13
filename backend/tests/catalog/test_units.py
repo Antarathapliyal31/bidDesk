@@ -680,6 +680,72 @@ class TestConvertFailure:
         assert r.note == "unit_conversion_unavailable"
 
 
+class TestAssumedEaFromCountlessQty:
+    """DECISIONS F14. When the analyst drops `unit_raw` on a line
+    whose source quote wrote the count as a bare / parenthesised
+    number (`(100) 2x4 x 8' SPF #2`) AND the SKU is sold by the
+    piece, the converter treats the number as a piece count and
+    caps confidence at medium."""
+
+    def test_whole_integer_qty_with_ea_sku_falls_back_to_identity(self) -> None:
+        r = convert_item_to_sale_qty(
+            item_qty=Decimal("100"),
+            item_unit=None,
+            unit_raw=None,
+            pint_convertible=False,
+            product={"sale_unit": "EA", "nominal_size": "2x4", "length_ft": 8},
+            dimensions=_dims(),
+        )
+        assert r.sale_qty == 100
+        assert r.conversion_path == "100 → 100 EA (no unit; assumed pieces)"
+        assert r.confidence_cap == "medium"
+        assert r.note == "assumed_ea_from_countless_qty"
+
+    def test_decimal_qty_still_fails(self) -> None:
+        # 12.5 "something" with no unit is not a piece count.
+        r = convert_item_to_sale_qty(
+            item_qty=Decimal("12.5"),
+            item_unit=None,
+            unit_raw=None,
+            pint_convertible=False,
+            product={"sale_unit": "EA", "nominal_size": "2x4", "length_ft": 8},
+            dimensions=_dims(),
+        )
+        assert r.sale_qty is None
+        assert r.note == "unit_conversion_unavailable"
+
+    def test_non_ea_sale_unit_still_fails(self) -> None:
+        # No unit + target SHT (sheet) → the number isn't a sheet
+        # count by assumption; the review flag path is correct here.
+        r = convert_item_to_sale_qty(
+            item_qty=Decimal("38"),
+            item_unit=None,
+            unit_raw=None,
+            pint_convertible=False,
+            product={"sale_unit": "SHT", "coverage_sqft": 32},
+            dimensions=_dims(),
+        )
+        assert r.sale_qty is None
+        assert r.note == "unit_conversion_unavailable"
+
+    def test_unit_raw_present_but_unrecognised_does_NOT_fall_back(self) -> None:
+        # Unit couldn't be normalised BUT `unit_raw` is set
+        # ("meters", "M", etc.) — the analyst extracted something
+        # that isn't a piece count, so we must NOT impute EA.
+        # The review flag path (`unit_conversion_unavailable`) is
+        # the right surface here.
+        r = convert_item_to_sale_qty(
+            item_qty=Decimal("20"),
+            item_unit=None,
+            unit_raw="meters",
+            pint_convertible=False,
+            product={"sale_unit": "EA", "nominal_size": "4x4", "length_ft": 8},
+            dimensions=_dims(),
+        )
+        assert r.sale_qty is None
+        assert r.note == "unit_conversion_unavailable"
+
+
 class TestConvertInvariantBreak:
     @pytest.mark.parametrize("qty", [Decimal("0"), Decimal("-1"), Decimal("-0.5")])
     def test_non_positive_qty_raises(self, qty: Decimal) -> None:

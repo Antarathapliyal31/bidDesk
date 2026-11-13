@@ -175,9 +175,14 @@ export type Bid = {
 };
 
 // ─── Edit operations (SPEC §9.4) ──────────────────────────────────
+//
+// Discriminators + field names mirror `backend/app/contracts/edits.py`
+// and `docs/API_CONTRACT.md` exactly — any drift is caught by
+// `tests/editOpContract.test.ts` loading the same fixture the
+// backend test parses.
 
-export type SetQuantityOp = {
-  op: "set_quantity";
+export type SetQtyOp = {
+  op: "set_qty";
   line_id: string;
   sale_qty: string;
 };
@@ -185,7 +190,8 @@ export type SetUnitPriceOp = {
   op: "set_unit_price";
   line_id: string;
   unit_price_cents: number;
-  reason: string | null;
+  // SPEC §9.4: override reason is REQUIRED and non-empty.
+  override_reason: string;
 };
 export type SetSkuOp = {
   op: "set_sku";
@@ -195,7 +201,7 @@ export type SetSkuOp = {
 export type SetDescriptionOp = {
   op: "set_description";
   line_id: string;
-  text: string;
+  description: string;
 };
 export type AcceptLineOp = {
   op: "accept_line";
@@ -212,21 +218,27 @@ export type AddLineOp = {
   sale_unit: string;
   unit_price_cents: number;
 };
-export type ApplyRepriceOp = {
-  op: "apply_reprice";
+export type ApplyProposalOp = {
+  op: "apply_proposal";
+  line_id: string;
+  proposal_id: string;
+};
+export type DismissProposalOp = {
+  op: "dismiss_proposal";
   line_id: string;
   proposal_id: string;
 };
 
 export type EditOp =
-  | SetQuantityOp
+  | SetQtyOp
   | SetUnitPriceOp
   | SetSkuOp
   | SetDescriptionOp
   | AcceptLineOp
   | DeleteLineOp
   | AddLineOp
-  | ApplyRepriceOp;
+  | ApplyProposalOp
+  | DismissProposalOp;
 
 // ─── Reprice proposal (SPEC §9.5) ─────────────────────────────────
 

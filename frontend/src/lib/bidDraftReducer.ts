@@ -134,8 +134,15 @@ export function bidDraftReducer(state: BidDraftState, action: BidDraftAction): B
       };
     }
     case "saveInvalid": {
+      // 4xx validation failures are terminal for the in-flight
+      // batch — dropping `inFlightOps` is what stops the autosave
+      // debounce from re-hammering the backend with a body that
+      // will keep 422ing (DECISIONS F13). The user sees the error
+      // via `error.kind === "invalid"` and can edit again to
+      // retry under new ops.
       return {
         ...state,
+        inFlightOps: [],
         saving: false,
         error: { kind: "invalid", perOpErrors: action.perOpErrors },
       };

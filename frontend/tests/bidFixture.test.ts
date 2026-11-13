@@ -43,11 +43,11 @@ describe("buildMessyBid", () => {
   });
 });
 
-describe("applyOps — set_quantity", () => {
+describe("applyOps — set_qty", () => {
   it("recomputes extended_cents and bumps origin to user_overridden", () => {
     const bid = seed();
     const line = bid.lines.find((l) => l.sale_qty !== null && l.unit_price_cents !== null)!;
-    const op: EditOp = { op: "set_quantity", line_id: line.line_id, sale_qty: "50" };
+    const op: EditOp = { op: "set_qty", line_id: line.line_id, sale_qty: "50" };
     const next = applyOps(bid, [op], new Map());
     const nextLine = next.lines.find((l) => l.line_id === line.line_id)!;
     expect(nextLine.sale_qty).toBe("50");
@@ -65,7 +65,7 @@ describe("applyOps — set_quantity", () => {
     const expectedSubtotal = bid.totals.subtotal_cents - oldExt + newExt;
     const next = applyOps(
       bid,
-      [{ op: "set_quantity", line_id: line.line_id, sale_qty: String(newQty) }],
+      [{ op: "set_qty", line_id: line.line_id, sale_qty: String(newQty) }],
       new Map(),
     );
     expect(next.totals.subtotal_cents).toBe(expectedSubtotal);
@@ -80,7 +80,7 @@ describe("applyOps — set_unit_price", () => {
       op: "set_unit_price",
       line_id: line.line_id,
       unit_price_cents: 9999,
-      reason: "negotiated",
+      override_reason: "negotiated",
     };
     const next = applyOps(bid, [op], new Map());
     const nextLine = next.lines.find((l) => l.line_id === line.line_id)!;
@@ -138,7 +138,7 @@ describe("applyOps — add_line", () => {
   });
 });
 
-describe("applyOps — apply_reprice", () => {
+describe("applyOps — apply_proposal", () => {
   it("swaps in the proposal's `after` and marks origins back to agent", () => {
     const bid = seed();
     const line = bid.lines.find((l) => l.unit_price_cents !== null)!;
@@ -167,7 +167,7 @@ describe("applyOps — apply_reprice", () => {
     const store = new Map([[proposal.proposal_id, proposal]]);
     const next = applyOps(
       bid,
-      [{ op: "apply_reprice", line_id: line.line_id, proposal_id: "rep_1" }],
+      [{ op: "apply_proposal", line_id: line.line_id, proposal_id: "rep_1" }],
       store,
     );
     const nextLine = next.lines.find((l) => l.line_id === line.line_id)!;

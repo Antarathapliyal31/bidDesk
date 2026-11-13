@@ -23,6 +23,8 @@ def _build_test_app() -> FastAPI:
     """Minimal app with routes that intentionally raise. Keeps
     the error-handling tests independent of real Phase 2 routes."""
 
+    from app.contracts.edits import EditRequest
+
     app = FastAPI()
     install_exception_handlers(app)
 
@@ -37,6 +39,30 @@ def _build_test_app() -> FastAPI:
     @app.get("/raise/unhandled")
     def raise_unhandled() -> None:
         raise RuntimeError("secret traceback with path /etc/shadow")
+
+    # Route that exercises the real `EditRequest` so a malformed
+    # body goes through FastAPI's RequestValidationError handler.
+    # We parse the JSON manually with the shared `TypeAdapter` and
+    # re-raise as `RequestValidationError` — this mirrors how
+    # FastAPI validates on PATCH /api/runs/{id}/bid, without the
+    # discriminated-union ForwardRef resolution issue the
+    # `response_model` / `Body(...)` paths hit under the strict
+    # EditRequest + Annotated discriminator setup.
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import TypeAdapter, ValidationError
+
+    _edit_adapter: TypeAdapter[EditRequest] = TypeAdapter(EditRequest)
+
+    @app.post("/edit-echo")
+    async def edit_echo(body: dict) -> dict[str, int]:
+        try:
+            parsed = _edit_adapter.validate_python(body)
+        except ValidationError as exc:
+            # Re-raise as a FastAPI RequestValidationError so our
+            # handler in app.api.errors picks it up — same end-to-
+            # end path as a real route.
+            raise RequestValidationError(exc.errors()) from exc
+        return {"ops": len(parsed.ops)}
 
     return app
 
@@ -109,3 +135,69 @@ class TestGeneric500:
         assert "RuntimeError" not in text
         assert "Traceback" not in text
         assert 'File "' not in text
+
+
+class TestRequestValidationEnvelope:
+    """FastAPI's own `RequestValidationError` must be rendered in
+    the SPEC §13 envelope — not the raw `detail` array — so the
+    frontend's single parser works on every 4xx (DECISIONS F13)."""
+
+    async def test_unknown_op_discriminator_returns_invalid_input_envelope(
+        self, test_client: AsyncClient
+    ) -> None:
+        response = await test_client.post(
+            "/edit-echo",
+            json={
+                "draft_revision": 1,
+                "ops": [{"op": "set_quantity", "line_id": "l1", "sale_qty": "5"}],
+            },
+        )
+        assert response.status_code == 422
+        body = response.json()
+        # Envelope shape, not FastAPI's raw `detail`.
+        assert set(body.keys()) == {"error"}
+        err = body["error"]
+        assert err["code"] == "invalid_input"
+        assert isinstance(err["message"], str) and err["message"]
+        # Per-op breakdown lands under details.ops[*].{index, error}.
+        ops = err["details"]["ops"]
+        assert len(ops) == 1
+        assert ops[0]["index"] == 0
+        assert "set_quantity" in ops[0]["error"] or "tag" in ops[0]["error"]
+
+    async def test_missing_required_field_is_also_envelope(
+        self, test_client: AsyncClient
+    ) -> None:
+        # `set_unit_price` without override_reason — real cause of
+        # the 422 the UI also hits on an override without reason.
+        response = await test_client.post(
+            "/edit-echo",
+            json={
+                "draft_revision": 1,
+                "ops": [
+                    {
+                        "op": "set_unit_price",
+                        "line_id": "l1",
+                        "unit_price_cents": 2222,
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 422
+        body = response.json()
+        assert body["error"]["code"] == "invalid_input"
+        ops = body["error"]["details"]["ops"]
+        assert ops[0]["index"] == 0
+        assert "override_reason" in ops[0]["error"]
+
+    async def test_non_op_body_error_lands_under_null_index(
+        self, test_client: AsyncClient
+    ) -> None:
+        # `draft_revision` missing entirely → not tied to an op.
+        response = await test_client.post(
+            "/edit-echo",
+            json={"ops": []},
+        )
+        assert response.status_code == 422
+        ops = response.json()["error"]["details"]["ops"]
+        assert any(entry["index"] is None for entry in ops)
