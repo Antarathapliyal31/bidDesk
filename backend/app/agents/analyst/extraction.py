@@ -6,11 +6,11 @@ text and the forced `report_extraction` tool. Return the raw
 parsed draft dict — verification lives in `verify.py` so this
 module stays focused on the LLM boundary.
 
-Vision page handling is a Phase-3-stretch item; for now we feed
-ONLY text-route pages into the extraction, and text+vision pages
-pass their text too. Scanned-only PDFs return an empty draft and
-the orchestrator surfaces an `unreadable` run — a subsequent
-follow-up iteration adds transcription (§6.2.5).
+Vision pages participate when `vision.transcribe_vision_pages`
+has populated their `.text` with a transcription. The extraction
+call consumes the text/transcription as one spotlight-wrapped
+block; `verify.py` is what decides `read_via='vision'` for items
+whose source_page was originally routed `vision` or `text+vision`.
 """
 
 from __future__ import annotations
@@ -96,17 +96,31 @@ class _LLMCallable(Protocol):
 
 
 def _text_pages_block(pages: list[PageExtract], tag: str) -> str:
-    """Join text + text+vision pages into a single spotlight-safe
-    block tagged with `[[page N]]` markers (SPEC §6.3)."""
+    """Join readable pages into a single spotlight-safe block
+    tagged with `[[page N]]` markers (SPEC §6.3).
+
+    Readable means `p.text` is non-empty. For text / text+vision
+    pages that's pdfplumber output; for transcribed vision pages
+    it's the vision transcription (set by
+    `vision.transcribe_vision_pages`). The marker also carries the
+    read origin (`image`) so the model knows which pages came from
+    transcription vs. the text layer — the LINE itself is still
+    stamped `read_via='vision'` by `verify.py` based on the page's
+    ORIGINAL route, not this marker.
+    """
 
     chunks: list[str] = []
     for p in pages:
-        if p.route == "vision":
-            # Skipped for Phase 3 scope — vision transcription is a
-            # stretch item; the caller sees the page in
-            # `unreadable_pages` on return.
+        if not p.text:
+            # Pages with empty text layer AND no transcription
+            # (either not a vision page we handled, or an empty
+            # transcription from a scan). Skipped here; the caller
+            # surfaces them in `unreadable_pages`.
             continue
-        chunks.append(f"[[page {p.page_no}]]\n{p.text}")
+        if p.route in ("vision", "text+vision"):
+            chunks.append(f"[[page {p.page_no} (image)]]\n{p.text}")
+        else:
+            chunks.append(f"[[page {p.page_no}]]\n{p.text}")
     return "\n\n".join(chunks)
 
 

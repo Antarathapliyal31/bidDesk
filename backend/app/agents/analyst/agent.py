@@ -26,6 +26,8 @@ from app.agents.analyst.extraction import (
 )
 from app.agents.analyst.routing import PageExtract, route_pasted_text, route_pdf
 from app.agents.analyst.verify import verify_items
+from app.agents.analyst.vision import transcribe_vision_pages
+from app.config import get_settings
 from app.contracts import AgentName, Contract, ItemView
 from app.runtime.delegate import AgentContext, AgentSpec, register_agent
 from app.runtime.spotlight import new_run_tag
@@ -92,18 +94,42 @@ class _AnalystHandler:
         ctx: AgentContext,
         feedback: Any,  # ValidationFeedback | None
     ) -> dict[str, Any]:
+        settings = get_settings()
         pages = self._route(request)
-        text_pages = [p for p in pages if p.route != "vision"]
-        unreadable: list[int] = [p.page_no for p in pages if p.route == "vision"]
+        unreadable: list[int] = []
 
-        # If every page was vision (scanned-only), we return an
-        # empty item list + the unreadable pages. The orchestrator
-        # treats this as an unreadable run.
-        if not text_pages:
+        # Vision + text+vision pages get a per-page transcription
+        # call (DECISIONS #26). `transcribe_vision_pages` returns a
+        # new pages list with transcriptions dropped into `.text`
+        # and a list of page_nos that must go to `unreadable_pages`
+        # (beyond the cap or empty transcription). For pasted-text
+        # runs there is no PDF to rasterize — skip.
+        if request.kind == "pdf" and request.pdf_path is not None:
+            pages, vision_unreadable = await transcribe_vision_pages(
+                self.llm,
+                bus=ctx.bus,
+                run_id=ctx.run_id,
+                pdf_path=Path(request.pdf_path),
+                pages=pages,
+                document_tag=request.document_tag,
+                max_pages=settings.max_vision_pages,
+            )
+            unreadable.extend(vision_unreadable)
+
+        # A page contributes to extraction iff it has text to show —
+        # that's text / text+vision pages (pdfplumber text) and
+        # successfully-transcribed vision pages. Everything else is
+        # unreadable.
+        readable_pages = [p for p in pages if p.text]
+        for p in pages:
+            if not p.text and p.page_no not in unreadable:
+                unreadable.append(p.page_no)
+
+        if not readable_pages:
             return AnalystResult(
                 items=[],
                 page_routes=_route_dicts(pages),
-                unreadable_pages=unreadable,
+                unreadable_pages=sorted(set(unreadable)),
                 project_name=None,
                 due_date_text=None,
             ).model_dump(mode="python")
@@ -113,7 +139,7 @@ class _AnalystHandler:
                 self.llm,
                 input_=ExtractionInput(
                     run_id=ctx.run_id,
-                    pages=text_pages,
+                    pages=readable_pages,
                     document_tag=request.document_tag,
                 ),
                 bus=ctx.bus,

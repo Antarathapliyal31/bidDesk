@@ -48,7 +48,14 @@ class Settings(BaseSettings):
     parse_timeout_s: int = Field(default=20, gt=0, alias="PARSE_TIMEOUT_S")
     single_call_max_pages: int = Field(default=30, gt=0, alias="SINGLE_CALL_MAX_PAGES")
 
-    analyst_timeout_s: int = Field(default=90, gt=0, alias="ANALYST_TIMEOUT_S")
+    # Vision cap (DECISIONS #26). Pages beyond the cap are not
+    # transcribed; they land in `unreadable_pages`. Default 10 is a
+    # compromise between recall on long scanned RFPs and the
+    # analyst's overall deadline.
+    max_vision_pages: int = Field(default=10, gt=0, alias="MAX_VISION_PAGES")
+    # Bumped from 90s on 2026-11-12 so 3x Sonnet image calls +
+    # extraction fit inside one delegate span (DECISIONS #26).
+    analyst_timeout_s: int = Field(default=150, gt=0, alias="ANALYST_TIMEOUT_S")
     pricing_batch_timeout_s: int = Field(default=45, gt=0, alias="PRICING_BATCH_TIMEOUT_S")
     run_timeout_s: int = Field(default=240, gt=0, alias="RUN_TIMEOUT_S")
     max_orchestrator_turns: int = Field(default=12, gt=0, alias="MAX_ORCHESTRATOR_TURNS")
