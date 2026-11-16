@@ -1,6 +1,6 @@
 # BidDesk
 
-Atreyus AI second-round take-home. An LBM distributor's estimator uploads an
+An LBM distributor's estimator uploads an
 RFP (PDF or pasted list), picks a branch, and watches three agents produce a
 priced, editable bid with every line traceable to its source page.
 
